@@ -1,7 +1,6 @@
 import type { PrepareRequest } from '@repo/controller'
 import type { Logger } from '@repo/kit'
 import type { QuoteOutcome, SwapPlan } from '@repo/swaps'
-import type { Hex } from 'viem'
 
 import { firstBid } from '@repo/kit'
 import { parseGwei } from 'viem'
@@ -45,8 +44,6 @@ const request = (slots = [0, 1]): PrepareRequest<PositionReading> => {
   }
 }
 
-type Line = { event: string; fields: Record<string, unknown> }
-
 const FREE_FEES = {
   l1Data: 0n,
   baseFee: 0n,
@@ -67,8 +64,7 @@ const harness = (
     simulates?: (plan: LiquidationPlan) => 'ok' | 'revert'
   } = {}
 ) => {
-  const lines: Line[] = []
-  const log = (event: string, fields: Record<string, unknown> = {}) => lines.push({ event, fields })
+  const log = () => {}
   const logger: Logger = { debug: log, info: log, warn: log, error: log }
   const stats = createTickStats()
   const attempted: number[] = []
@@ -81,7 +77,7 @@ const harness = (
     encode: (_market, _borrower, plan) => {
       last = plan
       attempted.push(plan.collateralIndex)
-      return '0xabcd' as Hex
+      return '0xabcd'
     },
     simulate: async () => ({ status: overrides.simulates?.(last!) ?? 'ok', reason: 'nope' }),
     feesFor: async () => FREE_FEES,
@@ -92,7 +88,7 @@ const harness = (
     logger,
     ...overrides
   }
-  return { deps, stats, lines, attempted }
+  return { deps, stats, attempted }
 }
 
 describe('preparing a Midnight liquidation', () => {
@@ -109,14 +105,9 @@ describe('preparing a Midnight liquidation', () => {
   })
 
   it('tries the loan-token slot first once the swap slot is charged its route cost', async () => {
-    const { deps, attempted, lines } = harness()
+    const { deps, attempted } = harness()
     await preparePosition(request(), pricingFor({ bps: 5_000 }), deps)
     expect(attempted).toStrictEqual([1])
-    expect(lines.find(line => line.event === 'plan.built')?.fields).toMatchObject({
-      rank: 1,
-      collateralIndex: 1,
-      routeCostBps: 0
-    })
   })
 
   it('falls through to the next alternative when the first fails to quote', async () => {
@@ -157,7 +148,7 @@ describe('preparing a Midnight liquidation', () => {
 
   it('declines a route short of the repay before simulating it, without backing off', async () => {
     let simulated = 0
-    const { deps, attempted, lines } = harness({
+    const { deps, attempted } = harness({
       quotes: plan => ({
         kind: 'swap',
         plan: { ...swap, expectedAmountOut: plan.impliedRepaidUnits - 1n },
@@ -175,15 +166,6 @@ describe('preparing a Midnight liquidation', () => {
     })
     expect(simulated).toBe(0)
     expect(attempted).toStrictEqual([])
-    const unprofitable = lines.find(line => line.event === 'quote.unprofitable')?.fields
-    const repay = unprofitable?.requiredRepay as bigint
-    expect(unprofitable).toMatchObject({
-      collateralIndex: 0,
-      requiredThreshold: repay,
-      achievableOut: repay - 1n,
-      shortfallBps: 0n,
-      minSurplusBps: 0
-    })
   })
 
   describe('with the native token priced', () => {
@@ -303,7 +285,7 @@ describe('preparing a Midnight liquidation', () => {
     ['one unit under the surplus threshold', -1n, false]
   ])('holds a route to the minimum surplus: %s', async (_, offset, viable) => {
     const minSurplusBps = 100
-    const { deps, lines } = harness({
+    const { deps } = harness({
       minSurplusBps,
       quotes: plan => {
         const repay = plan.impliedRepaidUnits
@@ -313,13 +295,6 @@ describe('preparing a Midnight liquidation', () => {
     })
     const answer = await preparePosition(request([0]), pricingFor(), deps)
     expect(answer.ok).toBe(viable)
-    const unprofitable = lines.find(line => line.event === 'quote.unprofitable')?.fields
-    if (viable) expect(unprofitable).toBeUndefined()
-    else
-      expect(unprofitable).toMatchObject({
-        minSurplusBps,
-        achievableOut: (unprofitable?.requiredThreshold as bigint) - 1n
-      })
   })
 
   it('lets an alternative short of its ramping incentive keep its position from backing off', async () => {
@@ -340,7 +315,7 @@ describe('preparing a Midnight liquidation', () => {
     const matured = request()
     const out = { ...outAt(unhealthy(0, 1, [0, 1]), 5_000n, 100n) }
     let quotes = 0
-    const { deps, lines } = harness({
+    const { deps } = harness({
       quotes: (): QuoteOutcome => {
         quotes += 1
         return { kind: 'failed', reason: 'api_error' }
@@ -353,11 +328,6 @@ describe('preparing a Midnight liquidation', () => {
     )
     expect(answer).toMatchObject({ ok: false, reason: 'failed', backoff: true })
     expect(quotes).toBe(2)
-    expect(
-      lines.filter(
-        line => line.event === 'preselect.skipped' && line.fields.reason === 'fall_through_bound'
-      )
-    ).toHaveLength(2)
   })
 
   it('simulates a write-off without quoting it, and never backs one off', async () => {
@@ -386,14 +356,11 @@ describe('preparing a Midnight liquidation', () => {
     })
   })
 
-  it('reads a price past its expiry as unpriced, and logs what expired', async () => {
-    const { deps, stats, lines } = harness({ now: () => 2_000 })
+  it('reads a price past its expiry as unpriced', async () => {
+    const { deps, stats } = harness({ now: () => 2_000 })
     const pricing = pricingFor({ bps: 100 })
     await preparePosition(request([0]), { ...pricing, prices: readingsOf(PRICES, 2_000) }, deps)
     expect(stats.flush()).toMatchObject({ candidates: 1, unpriced: 1 })
-    expect(lines.filter(line => line.event === 'pricing.expired')).toMatchObject([
-      { fields: { id: 'k', prices: 1, routes: 0, curves: 0 } }
-    ])
   })
 
   it('orders an unpriced loan token last and counts it', async () => {

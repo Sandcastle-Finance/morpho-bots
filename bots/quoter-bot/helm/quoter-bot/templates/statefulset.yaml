@@ -1,3 +1,4 @@
+{{- $replicas := toString .Values.replicas }}{{- if not (has $replicas (list "0" "1")) }}{{ fail (printf "quoter-bot: replicas must be 0 or 1, got %v: the bot is a singleton writer per maker and chain" .Values.replicas) }}{{- end }}
 {{- /*
 Renaming the singleton is rejected: on an installed release a changed nameOverride or
 fullnameOverride would make Helm create the newly named StatefulSet before deleting the old
@@ -44,7 +45,7 @@ spec:
   # (kubectl delete pod --force --grace-period=0, or force-deleting a partitioned Node). The
   # bot deliberately has no Kubernetes API access or external writer lock, so never force
   # delete; fence a failed node before letting the controller replace the pod.
-  replicas: 1
+  replicas: {{ $replicas }}
   serviceName: {{ include "quoter-bot.fullname" . | quote }}
   selector:
     matchLabels:

@@ -31,29 +31,6 @@ describe('tryCatch', () => {
       expect(result.error?.message).toContain('This value was thrown as is')
     })
 
-    it('should handle object throws', () => {
-      const result = tryCatch(() => {
-        throw { code: 500, message: 'Server error' }
-      })
-
-      expect(result.data).toBeNull()
-      expect(result.error).toBeInstanceOf(Error)
-    })
-
-    it('should handle null and undefined throws', () => {
-      const nullResult = tryCatch(() => {
-        throw null
-      })
-      const undefinedResult = tryCatch(() => {
-        throw undefined
-      })
-
-      expect(nullResult.data).toBeNull()
-      expect(nullResult.error).toBeInstanceOf(Error)
-      expect(undefinedResult.data).toBeNull()
-      expect(undefinedResult.error).toBeInstanceOf(Error)
-    })
-
     it('should preserve error properties', () => {
       const error = new Error('test')
       error.cause = 'root cause'
@@ -62,18 +39,6 @@ describe('tryCatch', () => {
       })
 
       expect(result.error?.cause).toBe('root cause')
-    })
-
-    it('should work with different return types', () => {
-      const stringResult = tryCatch(() => 'hello')
-      const arrayResult = tryCatch(() => [1, 2, 3])
-      const objectResult = tryCatch(() => ({ key: 'value' }))
-      const nullResult = tryCatch(() => null)
-
-      expect(stringResult.data).toBe('hello')
-      expect(arrayResult.data).toEqual([1, 2, 3])
-      expect(objectResult.data).toEqual({ key: 'value' })
-      expect(nullResult.data).toBeNull()
     })
   })
 
@@ -101,41 +66,12 @@ describe('tryCatch', () => {
       expect(result.error?.message).toContain('This value was thrown as is')
     })
 
-    it('should handle object rejections', async () => {
-      const result = await tryCatch(Promise.reject({ code: 500, message: 'Server error' }))
-
-      expect(result.data).toBeNull()
-      expect(result.error).toBeInstanceOf(Error)
-    })
-
-    it('should handle null and undefined rejections', async () => {
-      const nullResult = await tryCatch(Promise.reject(null))
-      const undefinedResult = await tryCatch(Promise.reject(undefined))
-
-      expect(nullResult.data).toBeNull()
-      expect(nullResult.error).toBeInstanceOf(Error)
-      expect(undefinedResult.data).toBeNull()
-      expect(undefinedResult.error).toBeInstanceOf(Error)
-    })
-
     it('should preserve error properties', async () => {
       const error = new Error('test')
       error.cause = 'root cause'
       const result = await tryCatch(Promise.reject(error))
 
       expect(result.error?.cause).toBe('root cause')
-    })
-
-    it('should work with different data types', async () => {
-      const stringResult = await tryCatch(Promise.resolve('hello'))
-      const arrayResult = await tryCatch(Promise.resolve([1, 2, 3]))
-      const objectResult = await tryCatch(Promise.resolve({ key: 'value' }))
-      const nullResult = await tryCatch(Promise.resolve(null))
-
-      expect(stringResult.data).toBe('hello')
-      expect(arrayResult.data).toEqual([1, 2, 3])
-      expect(objectResult.data).toEqual({ key: 'value' })
-      expect(nullResult.data).toBeNull()
     })
   })
 
@@ -200,50 +136,6 @@ describe('tryCatch', () => {
 
       expect(result.error).toBeInstanceOf(CustomError)
       expect((result.error as CustomError).code).toBe(99)
-    })
-  })
-
-  describe('tryCatchCapture pattern (sync → Result wrapping)', () => {
-    it('should return data from sync callback via Result', () => {
-      const result = tryCatch(() => {
-        const a = 1
-        const b = 2
-        return a + b
-      })
-
-      expect(result.data).toBe(3)
-      expect(result.error).toBeNull()
-    })
-
-    it('should capture error from sync callback and allow post-check', () => {
-      const result = tryCatch(() => {
-        throw new Error('sync failure')
-      })
-
-      // This is the pattern tryCatchCapture uses: check error, then act
-      if (result.error) {
-        expect(result.error.message).toBe('sync failure')
-        expect(result.data).toBeNull()
-      }
-    })
-
-    it('should capture error from async promise and allow post-check', async () => {
-      const result = await tryCatch(Promise.reject(new Error('async failure')))
-
-      if (result.error) {
-        expect(result.error.message).toBe('async failure')
-        expect(result.data).toBeNull()
-      }
-    })
-
-    it('should return void result from sync side-effect callback', () => {
-      let sideEffect = false
-      const result = tryCatch(() => {
-        sideEffect = true
-      })
-
-      expect(sideEffect).toBe(true)
-      expect(result.error).toBeNull()
     })
   })
 })

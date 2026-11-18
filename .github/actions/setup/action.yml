@@ -1,12 +1,8 @@
 name: 'Setup'
-description: 'Sets up the repository (pnpm + Node) and builds dist-emitting workspace packages'
+description: 'Sets up the repository (Bun + Node) and builds dist-emitting workspace packages'
 inputs:
   install:
     description: 'Whether to install dependencies'
-    required: false
-    default: 'true'
-  frozen-lockfile:
-    description: 'Whether to use --frozen-lockfile when installing dependencies'
     required: false
     default: 'true'
   build-contracts:
@@ -16,18 +12,12 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    # pnpm owns installs, workspace resolution, and script running. The version comes from
-    # package.json#packageManager, so it is not repeated here.
-    #
-    # Upstream now scopes `action-setup` to pnpm v10 and older and points v11+ at its successor,
-    # `pnpm/setup`. We stay on `action-setup` regardless: the org's GitHub Actions allowlist permits
-    # `pnpm/action-setup@*` and not `pnpm/setup@*`, so the successor fails every job at the Setup
-    # step with "is not allowed in morpho-org/morpho-bots". `action-setup` installs pnpm 11.11.0 here
-    # correctly. Moving to `pnpm/setup` — worth doing, since it verifies pnpm's release binary
-    # against GitHub's published digest rather than bootstrapping through an `npm ci` of `@pnpm/exe`
-    # — needs an org admin to allowlist it first.
-    - name: Set up pnpm
-      uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+    # Bun owns installs, workspace resolution, and script running; the version comes from
+    # package.json#packageManager, so it is not repeated here. Node runs the code.
+    - name: Set up Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      with:
+        bun-version-file: package.json
 
     - name: Install Node.js
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -37,10 +27,9 @@ runs:
     - name: Install dependencies
       if: ${{ inputs.install == 'true' }}
       shell: bash
-      run: |
-        pnpm install ${{ inputs.frozen-lockfile == 'true' && '--frozen-lockfile' || '' }}
+      run: bun install --frozen-lockfile
 
     - name: Build @repo/contracts
       if: ${{ inputs.build-contracts == 'true' }}
       shell: bash
-      run: pnpm --filter @repo/contracts run build
+      run: bun run --cwd packages/contracts build

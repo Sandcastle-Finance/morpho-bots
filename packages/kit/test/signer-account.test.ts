@@ -10,7 +10,7 @@ import {
   EXECUTOR_SELECTOR,
   isValidPrivateKey
 } from '@repo/kit'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -52,13 +52,6 @@ describe('isValidPrivateKey', () => {
 })
 
 describe('signer accounts', () => {
-  test('reuses one AWS KMS client per region across public-key and signing calls', async () => {
-    const source = await readFile(new URL('../src/signer-account.ts', import.meta.url), 'utf8')
-
-    expect(source).toContain('const kmsClients = new Map<string, KMSClient>()')
-    expect(source.match(/new KMSClient/g)).toHaveLength(1)
-  })
-
   test('decrypts a keystore only at the signer boundary', async () => {
     const password = '  keystore-秘密🔐  '
     const readFile = vi.fn(async () => '{"encrypted":true}')
@@ -389,20 +382,19 @@ describe('kernel nonce authority', () => {
     'a $method signer signs at exactly the kernel nonce $nonce',
     async ({ method, nonce }) => {
       const methods: string[] = []
-      vi.spyOn(globalThis, 'fetch').mockImplementation((async (
-        _url: unknown,
-        init?: RequestInit
-      ) => {
-        const body = JSON.parse(init?.body as string) as { id: number; method: string }
-        methods.push(body.method)
-        const result =
-          body.method === 'eth_chainId'
-            ? `0x${base.id.toString(16)}`
-            : body.method === 'eth_fillTransaction'
-              ? { raw: '0x', tx: filled }
-              : STALE_NONCE
-        return Response.json({ jsonrpc: '2.0', id: body.id, result })
-      }) as typeof fetch)
+      vi.spyOn(globalThis, 'fetch').mockImplementation(
+        async (_url: unknown, init?: RequestInit) => {
+          const body = JSON.parse(init?.body as string) as { id: number; method: string }
+          methods.push(body.method)
+          const result =
+            body.method === 'eth_chainId'
+              ? `0x${base.id.toString(16)}`
+              : body.method === 'eth_fillTransaction'
+                ? { raw: '0x', tx: filled }
+                : STALE_NONCE
+          return Response.json({ jsonrpc: '2.0', id: body.id, result })
+        }
+      )
       const signerAccount = await accounts[method]()
       const signer = createAccountSigner({
         chain: base,

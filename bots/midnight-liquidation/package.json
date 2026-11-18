@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "build": "tsx scripts/build.ts",
-    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
-    "seed:positions": "pnpm --filter \"{.}...\" --if-present run build && node --env-file-if-exists=.env dist/scripts/seed-liquidatable-positions.js",
-    "seed:loan-collateral": "pnpm --filter \"{.}...\" --if-present run build && node --env-file-if-exists=.env dist/scripts/seed-loan-collateral-position.js",
+    "prestart": "bun run --filter @repo/contracts build && bun run build",
+    "seed:positions": "bun run --filter @repo/contracts build && bun run build && node --env-file-if-exists=.env dist/scripts/seed-liquidatable-positions.js",
+    "seed:loan-collateral": "bun run --filter @repo/contracts build && bun run build && node --env-file-if-exists=.env dist/scripts/seed-loan-collateral-position.js",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
     "test": "vitest run",
     "typecheck": "soltag && tsc --noEmit"
@@ -27,7 +27,8 @@
     "openapi-fetch": "catalog:",
     "solc": "catalog:",
     "soltag": "catalog:",
-    "viem": "catalog:"
+    "viem": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@repo/typescript-config": "workspace:*",

@@ -16,6 +16,7 @@ import { ConfigService } from '../../../src/config/config.service'
 import { createWorldReads } from '../../../src/infrastructure/engine/world-reads'
 import { holdingsOf } from '../../../src/infrastructure/kernel/quoter-holdings'
 import { createProductionLadderAdapters } from '../../../src/infrastructure/ladder/production-ladder'
+import { createReadClients } from '../../../src/infrastructure/provider/read-clients'
 
 const privateKey: Hex = `0x${'11'.repeat(32)}`
 const maker = privateKeyToAccount(privateKey).address
@@ -47,19 +48,9 @@ const market = {
   continuousFee: 0
 } as unknown as IMarket
 
-vi.mock('@morpho-org/morpho-sdk', async importOriginal => ({
-  ...(await importOriginal<typeof import('@morpho-org/morpho-sdk')>()),
-  morphoViemExtension: () => () => ({
-    morpho: {
-      midnight: () => ({
-        getMarketData: async () => market,
-        getPositionData: async () => ({
-          market: { lossFactor: 0n },
-          accrueInterest: () => ({ credit: 0n, debt: 0n })
-        })
-      })
-    }
-  })
+vi.mock('../../../src/infrastructure/engine/market-lens.sol', () => ({
+  readMarketLens: async () => new Map(),
+  lensMarket: () => market
 }))
 
 const environment = {
@@ -185,7 +176,7 @@ describe('createProductionLadderAdapters Ecrecover disclosure', () => {
     try {
       const config = ConfigService.from(environment)
       const adapters = createProductionLadderAdapters(config, {
-        reads: createWorldReads(config)
+        reads: createWorldReads(config, createReadClients(config).chain)
       })
 
       const prepared = await adapters.prepareReplacement({

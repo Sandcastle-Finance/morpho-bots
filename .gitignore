@@ -2,7 +2,6 @@
 
 # Dependencies
 node_modules
-.pnpm-store
 
 # Local env files
 .env
@@ -28,6 +27,10 @@ coverage
 # Build Outputs
 build
 dist
+.next
+next-env.d.ts
+# `next dev` writes this when it detects a coding agent.
+tools/realtime-app/AGENTS.md
 
 # Debug
 *.log
@@ -60,3 +63,4 @@ dist
 
 # Devin local overrides (not shared)
 .devin/config.local.json
+__pycache__/

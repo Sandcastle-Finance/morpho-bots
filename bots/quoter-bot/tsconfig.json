@@ -3,8 +3,9 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "lib": ["ESNext", "DOM"],
-    "types": ["node", "react", "react-dom"]
+    "types": ["node", "react", "react-dom"],
+    "plugins": [{ "name": "soltag/plugin" }]
   },
-  "include": ["playground", "src", "test", "scripts"],
+  "include": ["playground", "src", "test", "scripts", ".soltag/types.d.ts"],
   "exclude": ["node_modules"]
 }

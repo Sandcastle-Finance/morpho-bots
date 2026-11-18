@@ -59,7 +59,7 @@ const treeOf = (
       ...cap,
       ...(buy ? {} : { reduceOnly: true, receiverIfMakerIsSeller: maker }),
       continuousFeeCap: 0n
-    } as Parameters<typeof Offer.create>[0])
+    })
   ])
 
 const groupOf = (tree: Tree) => tree.offers[0]!.group.toLowerCase() as Hex

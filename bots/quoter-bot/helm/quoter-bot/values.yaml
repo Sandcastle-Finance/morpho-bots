@@ -5,6 +5,8 @@
 # describes a deployment. See the chart README.md and the package-level
 # bots/quoter-bot/README.md#configuration for every supported configuration key.
 
+replicas: 1
+
 image:
   repository: morphoorg/quoter
   # Defaults to the chart appVersion (`latest`). Every release also publishes an immutable
@@ -120,6 +122,8 @@ config: {}
 #     kernelEnrollment: enrolling
 #     # Optional: safe (the default), finalized, or a block depth.
 #     finality: safe
+#   # Optional, true by default: redeem withdrawable maker credit at par before quoting again.
+#   redeemWithdrawable: true
 #   bootstrap: []
 #   ladder:
 #     - marketId: '0x5555555555555555555555555555555555555555555555555555555555555555'

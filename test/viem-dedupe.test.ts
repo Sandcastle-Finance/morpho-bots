@@ -7,8 +7,8 @@ import { describe, expect, it } from 'vitest'
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * Every workspace member directory (`pnpm-workspace.yaml`'s groups) that ships a package.json, as paths
- * relative to the repo root.
+ * Every workspace member directory (the root `package.json` `workspaces` globs) that ships a
+ * package.json, as paths relative to the repo root.
  */
 const workspaceMembers = (): string[] =>
   ['bots', 'packages', 'framework', 'tools']
@@ -48,7 +48,7 @@ const resolvedCopy = (member: string, dependency: string): string => {
 }
 
 // Regression guard for the staging incident of 2026-08-12: `@repo/swaps` held zod 3 while every
-// other member held zod 4, so pnpm gave it its own peer-variation copy of viem (viem's transitive
+// other member held zod 4, so the package manager gave it its own peer-variation copy of viem (viem's transitive
 // `abitype` declares an optional zod peer). The two copies export two distinct `BaseError` classes,
 // so `error instanceof BaseError` in `packages/swaps/src/unwrappers/erc4626.ts` was false for every
 // error thrown by a `@repo/bot-kit` client — a plain ERC20 reverting on `asset()` was rethrown as an

@@ -1,4 +1,4 @@
-{{- if not (has (int .Values.replicas) (list 0 1)) }}{{ fail (printf "midnight-crossed-books: replicas must be 0 or 1, got %v: every pod signs with the same key and keeps its own nonce cursor" .Values.replicas) }}{{- end }}
+{{- $replicas := toString .Values.replicas }}{{- if not (has $replicas (list "0" "1")) }}{{ fail (printf "midnight-crossed-books: replicas must be 0 or 1, got %v: every pod signs with the same key and keeps its own nonce cursor" .Values.replicas) }}{{- end }}
 {{- range .Values.env }}{{- if eq .name "KERNEL_STATE_DIR" }}{{ fail "midnight-crossed-books: env must not set KERNEL_STATE_DIR: the chart points it at the state volume" }}{{- end }}{{- end }}
 {{- range .Values.env }}{{- if eq .name "JOURNAL_RUN_CAP_BYTES" }}{{ fail "midnight-crossed-books: env must not set JOURNAL_RUN_CAP_BYTES: the chart sets it from state.journalRunCapBytes" }}{{- end }}{{- end }}
 apiVersion: apps/v1
@@ -10,7 +10,7 @@ metadata:
   annotations:
     secret.reloader.stakater.com/reload: {{ include "midnight-crossed-books.runtimeSecretName" . | quote }}
 spec:
-  replicas: {{ .Values.replicas }}
+  replicas: {{ $replicas }}
   serviceName: {{ include "midnight-crossed-books.fullname" . | quote }}
   podManagementPolicy: OrderedReady
   updateStrategy:

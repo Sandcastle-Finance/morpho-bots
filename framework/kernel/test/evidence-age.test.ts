@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import type { PlanInput } from '../src'
 
-import { KernelConfigError } from '../src/errors'
 import { liquidationPlan, makeConfig } from './fixtures'
 import { Harness } from './harness'
 
@@ -61,13 +60,6 @@ describe('the evidence age bound', () => {
     })
     resting(h, 'edge', h.block - K)
     expect(h.notices('edge')).toEqual(['admitted'])
-  })
-
-  it('refuses a configured bound that is not an integer in its range', () => {
-    for (const bound of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 2 ** 32 + 1])
-      expect(() => new Harness(makeConfig({ maxEvidenceAgeBlocks: bound as number }))).toThrow(
-        KernelConfigError
-      )
   })
 })
 

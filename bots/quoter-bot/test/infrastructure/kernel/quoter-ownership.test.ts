@@ -50,7 +50,7 @@ const ledgerOf = (maker: Address, signer: Address) => {
     tick: 6_000n,
     maxUnits: 1_000n,
     continuousFeeCap: 0n
-  } as Parameters<typeof Offer.create>[0])
+  })
   const tree = Tree.create([offer])
   const id = midnightCommitmentId(offer.group)
   const text = ledgerText(CHAIN, signer, [

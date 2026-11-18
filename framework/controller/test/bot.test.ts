@@ -25,7 +25,16 @@ import { describe, expect, it } from 'vitest'
 
 import type { Bot, FactNode, KernelHandle, LogSink, PrepareOutcome, PrepareRequest } from '../src'
 
-import { declareView, defineBot, kernelDomain, parseIntentId, tasks, task } from '../src'
+import {
+  declareHealth,
+  declareView,
+  defineBot,
+  EvidenceDefectError,
+  kernelDomain,
+  parseIntentId,
+  tasks,
+  task
+} from '../src'
 import { configFor, dryHosting, dryWorld, EXECUTOR, FEE, until } from './fixtures'
 
 const executorValidator: Validator = {
@@ -112,7 +121,7 @@ const track = (
   g.fold('held.track', {
     reads: { activity: every(activity) },
     emits: [heldWrites],
-    initial: {} as Readonly<Record<string, true>>,
+    initial: {},
     applyInput: (keys, { value }) => {
       const next: Record<string, true> = { ...keys }
       for (const a of value) {
@@ -143,7 +152,7 @@ const looped = (read: typeof latest | typeof sample, through: 'fold' | 'stream' 
         heldWrites: tracked,
         held: g.fold('held', {
           reads: { write: every(tracked) },
-          initial: {} as Readonly<Record<string, true>>,
+          initial: {},
           applyInput: (_, { value }) => ({ state: value })
         })
       }
@@ -350,12 +359,13 @@ const besideFamily = (second = false) =>
 const rawHosted = () =>
   defineBot('raw', b => {
     const domain = kernelDomain('raw')
-    const { host, view, keyed, facts } = b.raw(g => {
+    const { host, view, health, keyed, facts } = b.raw(g => {
       const kernelHost = declareKernelHost(g, HOSTING)
       const positions = positionsOf(g)
       return {
         host: kernelHost,
         view: declareView(g, 'kernel.view', kernelHost.nodes.state),
+        health: declareHealth(g, 'kernel.health', kernelHost.nodes.state, { chainId: 1 }),
         keyed: positions,
         facts: domain.fact(keyedMap(g, 'facts', positions.positions, ({ bid }) => ({ bid })))
       }
@@ -365,6 +375,7 @@ const rawHosted = () =>
       domain,
       nodes: host.nodes,
       view,
+      health,
       start: host.start,
       requestsFrom: node => void requests.push(node)
     }
@@ -414,6 +425,32 @@ describe('a bot that reads its kernel before declaring its facts', () => {
         'acts.requests reaches the kernel of late after its declaration returned'
       )
     )
+  })
+})
+
+describe('a halt on a failure outside the kernel', () => {
+  it('names the node an evidence defect failed at, and nothing the error carries', async () => {
+    const secret = 'https://rpc.example/secret'
+    const { graph, kernel } = defineBot('defect', b => {
+      const hosted = b.kernel({ ...HOSTING, ...dryWorld() })
+      b.raw(g =>
+        g.map('defect.view', {
+          reads: { state: latest(hosted.nodes.state) },
+          compute: ({ state }) => {
+            if (state.lifecycle.kind === 'running')
+              throw Object.assign(new EvidenceDefectError(secret), { name: secret, code: secret })
+            return state.lifecycle.kind
+          }
+        })
+      )
+      return { kernel: hosted }
+    })(undefined)
+    const runner = createRunner(graph, { now: () => 0, journal: JOURNAL })
+    await kernel.start(runner)
+    await expect(runner.stopped).rejects.toMatchObject({
+      origin: 'defect.view',
+      stop: { type: 'report', outcome: 'clean', reason: 'defect.view failed' }
+    })
   })
 })
 

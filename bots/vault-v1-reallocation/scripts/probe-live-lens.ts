@@ -15,7 +15,7 @@
  *
  * Usage (needs an RPC for CHAIN_ID; no anvil required):
  *   RPC_URL=https://base-rpc.publicnode.com CHAIN_ID=8453 VAULT=0x… \
- *     pnpm --filter @morpho-org/vault-v1-reallocation run probe:lens
+ *     bun run --filter @morpho-org/vault-v1-reallocation probe:lens
  */
 import { getChainAddresses } from '@morpho-org/blue-sdk'
 import { fetchAccrualVault, metaMorphoAbi } from '@morpho-org/blue-sdk-viem'

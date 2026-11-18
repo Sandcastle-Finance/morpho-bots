@@ -22,11 +22,19 @@ const ladderKey = `ladder:${ladderId}`
 const bootstrapKey = `bootstrap:${bootstrapId}`
 const keys = [bootstrapKey, ladderKey]
 
-const rest = (workflow: 'ladder' | 'bootstrap', marketId: Hex): MarketReport =>
-  ({ workflow, marketId, status: 'observed', action: 'rest' }) as MarketReport
+const rest = (workflow: 'ladder' | 'bootstrap', marketId: Hex): MarketReport => ({
+  workflow,
+  marketId,
+  status: 'observed',
+  action: 'rest'
+})
 
-const preparing = (workflow: 'ladder' | 'bootstrap', marketId: Hex): MarketReport =>
-  ({ workflow, marketId, status: 'observed', action: 'preparing' }) as MarketReport
+const preparing = (workflow: 'ladder' | 'bootstrap', marketId: Hex): MarketReport => ({
+  workflow,
+  marketId,
+  status: 'observed',
+  action: 'preparing'
+})
 
 const act = (condition = 'publish'): Act => ({
   kind: 'replace',
@@ -518,6 +526,78 @@ describe('the failure budget', () => {
     h.decide(bootstrapKey, { ...rest('bootstrap', bootstrapId), action: 'target-reached' })
     for (let poll = 0; poll < MARKET_FAILURE_BUDGET_CYCLES; poll += 1) h.poll()
     expect(h.exhausted()).toEqual([])
+  })
+})
+
+describe('a market that supersedes its own act', () => {
+  const settledN = {
+    ...ended(ladderKey, 'settled', {
+      cancel: [],
+      report: { status: 'applied', action: 'replace' }
+    }),
+    outcome: {
+      ...ended(ladderKey, 'settled', {}).outcome,
+      intentId: `${ladderKey}#run.1`,
+      payload: { cancel: [], report: { status: 'applied', action: 'replace' } } as never
+    }
+  }
+  const supersededO = (notice: Outcome['notice']) => {
+    const event = ended(ladderKey, notice, {})
+    return { ...event, outcome: { ...event.outcome, supersededBy: `${ladderKey}#run.1` } }
+  }
+  const pollCounted = (h: ReturnType<typeof harness>) =>
+    (h.counted.at(-1) as Extract<QuoterReport, { type: 'poll' }>).counted.filter(
+      report => report.workflow === 'ladder'
+    )
+
+  test('counts its successor’s outcome, never the superseded act compensated after it', () => {
+    const h = harness()
+    h.poll()
+    h.submit(ladderKey)
+    h.submit(ladderKey)
+    h.end(settledN)
+    const before = h.events.length
+    h.end(supersededO('compensated'))
+    expect(completed(h.events.slice(before))).toEqual([
+      expect.objectContaining({
+        workflow: 'ladder',
+        status: 'observed',
+        action: 'superseded',
+        reason: 'compensated'
+      })
+    ])
+    h.poll()
+    expect(pollCounted(h)).toEqual([
+      expect.objectContaining({ status: 'applied', action: 'replace' })
+    ])
+    for (let poll = 0; poll < MARKET_FAILURE_BUDGET_CYCLES; poll += 1) h.poll()
+    expect(h.exhausted()).toEqual([])
+    expect(h.reporter.reports.final()[1]).toMatchObject({ status: 'applied', action: 'replace' })
+  })
+
+  test('keeps the market in flight while its successor runs after the superseded act ended', () => {
+    const h = harness()
+    h.poll()
+    h.submit(ladderKey)
+    h.submit(ladderKey)
+    h.end(supersededO('abandoned'))
+    h.poll()
+    expect(pollCounted(h)).toEqual([])
+    h.end(settledN)
+    h.poll()
+    expect(pollCounted(h)).toEqual([expect.objectContaining({ status: 'applied' })])
+    for (let poll = 0; poll < MARKET_FAILURE_BUDGET_CYCLES; poll += 1) h.poll()
+    expect(h.exhausted()).toEqual([])
+  })
+
+  test('counts its successor’s failure', () => {
+    const h = harness()
+    h.submit(ladderKey)
+    h.submit(ladderKey)
+    h.end(supersededO('abandoned'))
+    h.end({ ...settledN, outcome: { ...settledN.outcome, notice: 'failed' } })
+    for (let poll = 0; poll < MARKET_FAILURE_BUDGET_CYCLES; poll += 1) h.poll()
+    expect(h.exhausted()).toEqual(['ladder'])
   })
 })
 

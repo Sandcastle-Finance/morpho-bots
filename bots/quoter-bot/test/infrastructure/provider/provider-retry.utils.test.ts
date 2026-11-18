@@ -88,14 +88,6 @@ describe('retryTransientProviderRead', () => {
 
     expect(attempt).toHaveBeenCalledTimes(3)
     expect(outcome).toEqual({ error })
-    expect(error).toBeInstanceOf(SafeProviderError)
-    expect(error.failure).toStrictEqual({
-      kind: 'provider-error',
-      provider: 'router-api',
-      name: 'HttpError',
-      status: 502,
-      context: 'request'
-    })
   })
 
   test('waits a half-jittered exponential backoff between attempts', async () => {

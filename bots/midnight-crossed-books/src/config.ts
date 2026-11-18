@@ -1,17 +1,9 @@
-import type { Finality } from '@repo/kit'
+import type { KernelSettings } from '@repo/kit'
 import type { Address, Chain, Hex } from 'viem'
 
 import { CrossedBooksResolver } from '@repo/contracts'
-import { feeCeiling, parseFinality, stepCap } from '@repo/kit'
-import {
-  getAddress,
-  isAddress,
-  isAddressEqual,
-  isHex,
-  parseEther,
-  parseGwei,
-  zeroAddress
-} from 'viem'
+import { parseKernelSettings } from '@repo/kit'
+import { getAddress, isAddress, isAddressEqual, isHex, zeroAddress } from 'viem'
 import { base } from 'viem/chains'
 
 import { DEFAULT_MAX_MATCHES } from './domain/matching.service'
@@ -21,29 +13,14 @@ const MIDNIGHT = getAddress('0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A')
 const PRIVATE_KEY_HEX_LENGTH = 66
 const DEFAULT_API_BASE_URL = 'https://api.morpho.org'
 const DEFAULT_SCAN_INTERVAL_MS = '15000'
-const GWEI = /^\d+(\.\d{1,9})?$/
-const POSITIVE_DECIMAL = /^\d+(\.\d+)?$/
-/** Below the intrinsic cost of any transaction, the signer policy would refuse every send. */
-const MIN_GAS_LIMIT = 21_000n
 
 type Env = Record<string, string | undefined>
-
-export type KernelStoreConfig = Readonly<{
-  stateDirectory: string
-  enrollment: 'enrolling' | 'enrolled'
-}>
 
 /** Write mode: the key the kernel signs with, and what bounds what it signs. */
 export type WriteConfig = Readonly<{
   readOnly: false
   privateKey: Hex
-  finality: Finality
-  kernel: KernelStoreConfig
-  maxFeePerGasWei: bigint
-  /** The ceiling on a signed transaction's gas limit. */
-  maxGasLimit: bigint
-  /** What one transaction may spend on fees, and so what the kernel reserves of the account's ETH. */
-  maxSpendWei: bigint
+  kernel: KernelSettings
 }>
 
 /** Readonly mode holds no key: it simulates as the public EOA that would execute. */
@@ -106,66 +83,30 @@ const readonlyConfig = (env: Env): ReadonlyConfig => {
   return { readOnly: true, simulationCaller: getAddress(caller) }
 }
 
-/**
- * `KERNEL_STATE_DIR` holds the kernel's ledger and must survive a restart. `KERNEL_ENROLLMENT` is
- * `enrolling` for the first start of a fresh account and `enrolled` for every later one.
- */
-const kernelConfig = (env: Env): KernelStoreConfig => {
-  const stateDirectory = required(env, 'KERNEL_STATE_DIR')
-  const enrollment = required(env, 'KERNEL_ENROLLMENT')
-  if (enrollment !== 'enrolling' && enrollment !== 'enrolled')
-    throw new InvalidConfigurationError('KERNEL_ENROLLMENT must be "enrolling" or "enrolled"')
-  return { stateDirectory, enrollment }
-}
-
-const writeConfig = (env: Env, chainId: number): WriteConfig => {
+const writeConfig = (env: Env, chain: Chain): WriteConfig => {
   const privateKey = required(env, 'RESOLVER_PRIVATE_KEY')
   if (!isHex(privateKey, { strict: true }) || privateKey.length !== PRIVATE_KEY_HEX_LENGTH)
     throw new InvalidConfigurationError(
       'RESOLVER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string'
     )
-  const finalityName = `FINALITY_${chainId}`
-  const finality = parseFinality(required(env, finalityName))
-  if (finality === undefined)
-    throw new InvalidConfigurationError(
-      `${finalityName} must be safe, finalized, or a positive block depth`
-    )
-  const maxFeeGwei = required(env, 'MAX_FEE_GWEI')
-  const maxFeePerGasWei = GWEI.test(maxFeeGwei) ? parseGwei(maxFeeGwei) : 0n
-  if (maxFeePerGasWei === 0n)
-    throw new InvalidConfigurationError('MAX_FEE_GWEI must be a gwei amount of at least one wei')
-  const maxSpendEth = required(env, 'MAX_SPEND_ETH')
-  if (!POSITIVE_DECIMAL.test(maxSpendEth) || parseEther(maxSpendEth) === 0n)
-    throw new InvalidConfigurationError('MAX_SPEND_ETH must be a positive decimal')
-  const maxSpendWei = parseEther(maxSpendEth)
-  if (stepCap(feeCeiling(maxFeePerGasWei, maxSpendWei)) <= 0n)
-    throw new InvalidConfigurationError(
-      `MAX_FEE_GWEI (${maxFeeGwei}) and MAX_SPEND_ETH (${maxSpendEth}) cannot fund a nonce fill and a step bid below it`
-    )
-  const maxGasLimit = required(env, 'MAX_GAS_LIMIT')
-  if (!/^\d+$/.test(maxGasLimit) || BigInt(maxGasLimit) < MIN_GAS_LIMIT)
-    throw new InvalidConfigurationError(`MAX_GAS_LIMIT must be at least ${MIN_GAS_LIMIT}`)
   return {
     readOnly: false,
     privateKey,
-    finality,
-    kernel: kernelConfig(env),
-    maxFeePerGasWei,
-    maxGasLimit: BigInt(maxGasLimit),
-    maxSpendWei
+    kernel: parseKernelSettings(env, chain, { spendBounds: 'configured' })
   }
 }
 
 /**
  * Reads and validates the bot's configuration, with no network access. Readonly mode neither reads
  * nor keeps `RESOLVER_PRIVATE_KEY`, and write mode ignores `SIMULATION_CALLER_ADDRESS`.
- * @throws InvalidConfigurationError - for any missing or malformed value.
+ * @throws InvalidConfigurationError - for any missing or malformed value, or one of kit's errors from
+ * {@link parseKernelSettings} for a kernel setting.
  */
 export const loadConfig = (env: Env = process.env): Config => {
   const chainId = Number(unsignedDecimal(env, 'CHAIN_ID'))
   if (chainId !== base.id)
     throw new InvalidConfigurationError(`Unsupported CHAIN_ID ${chainId}; supported: ${base.id}`)
-  const mode = parseReadonly(env.READONLY) ? readonlyConfig(env) : writeConfig(env, chainId)
+  const mode = parseReadonly(env.READONLY) ? readonlyConfig(env) : writeConfig(env, base)
 
   const resolverOverride = env.RESOLVER_ADDRESS?.trim()
   if (resolverOverride && !isAddress(resolverOverride, { strict: false }))

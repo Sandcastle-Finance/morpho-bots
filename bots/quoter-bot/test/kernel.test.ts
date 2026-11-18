@@ -1,5 +1,6 @@
 import type { Command, KernelActivity, KernelEvent, KernelState } from '@repo/kernel'
-import type { Address, Hex } from 'viem'
+import type { AddressInfo } from 'node:net'
+import type { Address, Hex, PrivateKeyAccount, TransactionSerialized } from 'viem'
 
 import {
   EcrecoverRatifierUtils,
@@ -16,12 +17,14 @@ import { NONCE_FILL_MAX_GAS } from '@repo/kit'
 import {
   midnightCancellation as cancellation,
   midnightCommitmentId,
-  midnightPublicationPlan as publicationPlan
+  midnightPublicationPlan as publicationPlan,
+  midnightRedemption
 } from '@repo/validators'
+import { createServer } from 'node:http'
 import {
   encodeFunctionData,
-  hashMessage,
-  recoverAddress,
+  getAbiItem,
+  recoverTransactionAddress,
   toFunctionSelector,
   zeroAddress
 } from 'viem'
@@ -31,19 +34,26 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { MonitoringEvent } from '../src/application/monitoring/monitoring-event'
 
 import { ConfigService } from '../src/config/config.service'
+import { createReadClients } from '../src/infrastructure/provider/read-clients'
 import {
   createKernelLog,
-  createSignerAccount,
   dryHosting,
+  loadQuoterSigner,
   quoterKernelConfig,
   quoterKernelSpec
 } from '../src/kernel'
+import { localKms } from './fixtures/local-kms'
 
 const CHAIN = 8453
 // Anvil's published development key: a throwaway maker that never holds funds.
-const maker = privateKeyToAccount(
-  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'
-)
+const MAKER_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'
+const maker = privateKeyToAccount(MAKER_KEY)
+const makerSigner = await loadQuoterSigner({
+  readOnly: false,
+  maker: maker.address,
+  method: 'private-key',
+  privateKey: MAKER_KEY
+})
 const market = {
   chainId: BigInt(CHAIN),
   midnight: getChainAddress(CHAIN, 'midnight'),
@@ -69,7 +79,7 @@ const environment = (ratifier: 'ecrecoverRatifier' | 'setterRatifier') => ({
   RPC_URL: 'https://rpc.example',
   REFERENCE_RPC_URL: 'https://archive.example',
   MAKER_ADDRESS: maker.address,
-  MAKER_PRIVATE_KEY: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+  MAKER_PRIVATE_KEY: MAKER_KEY,
   MIDNIGHT_ADDRESS: getChainAddress(CHAIN, 'midnight'),
   LOAN_ASSET_ADDRESS: market.loanToken,
   RATIFIER_ADDRESS: getChainAddress(CHAIN, ratifier),
@@ -90,8 +100,8 @@ const environment = (ratifier: 'ecrecoverRatifier' | 'setterRatifier') => ({
   ROUTER_API_BASE_URL: 'https://router.example'
 })
 
-const offer = (ratifier: Address, buy: boolean) =>
-  Offer.create({
+const offer = (ratifier: Address, buy: boolean) => {
+  const params: Parameters<typeof Offer.create>[0] = {
     market,
     buy,
     maker: maker.address,
@@ -102,7 +112,9 @@ const offer = (ratifier: Address, buy: boolean) =>
     maxUnits: 1_000_000n,
     continuousFeeCap: 0n,
     ...(buy ? {} : { reduceOnly: true, receiverIfMakerIsSeller: maker.address })
-  } as Parameters<typeof Offer.create>[0])
+  }
+  return Offer.create(params)
+}
 
 /** Drives the real kernel and validator to `running`, as the driver would at start. */
 const runningKernel = (config: ConfigService) => {
@@ -155,7 +167,10 @@ describe('quoter kernel reorg window', () => {
       MIDNIGHT_ADDRESS: getChainAddress(chainId, 'midnight'),
       RATIFIER_ADDRESS: getChainAddress(chainId, 'ecrecoverRatifier')
     })
-    expect(quoterKernelSpec({ config, account: maker }).hosting.reorgDepth).toBe(depth)
+    expect(
+      quoterKernelSpec({ config, signer: makerSigner, client: createReadClients(config).chain })
+        .hosting.reorgDepth
+    ).toBe(depth)
     expect(dryHosting(config).reorgDepth).toBe(depth)
   })
 
@@ -184,7 +199,11 @@ describe('quoter kernel reorg window', () => {
     'keeps the startup refusal boundary at lag %i',
     async lag => {
       const config = ConfigService.from(environment('ecrecoverRatifier'))
-      const hosting = quoterKernelSpec({ config, account: maker }).hosting
+      const hosting = quoterKernelSpec({
+        config,
+        signer: makerSigner,
+        client: createReadClients(config).chain
+      }).hosting
       const chain = new FakeChain()
       chain.height = 5_000
       chain.finalityLag = lag
@@ -231,9 +250,11 @@ describe('quoter kernel plans', () => {
     if (sign?.type !== 'sign' || sign.payload.kind !== 'typed')
       throw new Error('expected a typed signature')
 
-    const signature = await maker.signTypedData(
-      EcrecoverRatifierUtils.typedData({ tree, chainId: CHAIN }) as never
-    )
+    const typedData: Parameters<typeof maker.signTypedData>[0] = EcrecoverRatifierUtils.typedData({
+      tree,
+      chainId: CHAIN
+    })
+    const signature = await maker.signTypedData(typedData)
     const afterSign = harness.send({ type: 'Signed', request: sign.request, signature })
     const materialize = afterSign.find(command => command.type === 'materialize')
     if (materialize?.type !== 'materialize') throw new Error('expected the publication to be built')
@@ -350,7 +371,8 @@ const signTx = (
 ) =>
   quoterKernelSpec({
     config,
-    account: maker,
+    signer: makerSigner,
+    client: createReadClients(config).chain,
     ...(writeEvent && { writeEvent })
   }).hosting.effects.signTx(
     { kind: 'tx', to, data, value: 0n },
@@ -515,17 +537,66 @@ describe('quoter signing policy', () => {
   })
 })
 
-describe('quoter kernel identity', () => {
-  test('refuses a local signer that is not the maker', () => {
-    const stranger = privateKeyToAccount(`0x${'22'.repeat(32)}`)
-    const config = ConfigService.from(environment('setterRatifier'))
-    expect(() => quoterKernelSpec({ config, account: stranger })).toThrow(
-      expect.objectContaining({ operation: 'signer-identity-mismatch' })
-    )
+describe('quoter redemption signing policy', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const midnight = getChainAddress(CHAIN, 'midnight')
+  const withdraw = toFunctionSelector(getAbiItem({ abi: midnightAbi, name: 'withdraw' }))
+  const redemption = midnightRedemption(CHAIN, maker.address, { market, units: 1_000n }).data as Hex
+  const redeeming = () => ConfigService.from(environment('setterRatifier'))
+  /** `MAX_REDEMPTION_GAS` in `src/kernel.ts`. */
+  const maxRedemptionGas = 600_000n
+  /** A `withdraw` naming a market with Midnight's maximum of 128 collaterals. */
+  const widestRedemption = 4 + 32 * 13 + 32 * 4 * 128
+
+  test('signs a redemption at MAX_REDEMPTION_GAS, and at its widest market', async () => {
+    stubRpc(maxRedemptionGas)
+    await expect(signTx(redeeming(), midnight, redemption)).resolves.toMatchObject({
+      hash: expect.stringMatching(/^0x[0-9a-f]{64}$/)
+    })
+    await expect(
+      signTx(redeeming(), midnight, `${withdraw}${'01'.repeat(widestRedemption - 4)}` as Hex)
+    ).resolves.toMatchObject({ hash: expect.stringMatching(/^0x[0-9a-f]{64}$/) })
   })
 
-  test('refuses a KMS signer that is the maker itself, and accepts a delegate', () => {
-    const config = ConfigService.from({
+  test('signs a redemption with its gas headroom under its own ceiling, not the smallest rule', async () => {
+    stubRpc(200_000n)
+    await expect(signTx(redeeming(), midnight, redemption)).resolves.toMatchObject({
+      bid: { gas: 240_000n }
+    })
+    stubRpc(1_000_000n)
+    await expect(
+      signTx(redeeming(), getChainAddress(CHAIN, 'midnightMempool'), '0x01')
+    ).resolves.toMatchObject({ bid: { gas: 1_200_000n } })
+  })
+
+  test.each([
+    {
+      name: 'a redemption above MAX_REDEMPTION_GAS',
+      gas: maxRedemptionGas + 1n,
+      data: redemption,
+      check: 'gas'
+    },
+    {
+      name: 'a redemption wider than any market Midnight accepts',
+      gas: 50_000n,
+      data: `${withdraw}${'01'.repeat(widestRedemption - 3)}` as Hex,
+      check: 'maxDataBytes'
+    }
+  ])('refuses to sign $name', async ({ gas, data, check }) => {
+    stubRpc(gas)
+    await expect(signTx(redeeming(), midnight, data)).rejects.toMatchObject({
+      name: 'PolicyViolationError',
+      check
+    })
+  })
+})
+
+describe('quoter kernel identity', () => {
+  const strangerKey = `0x${'22'.repeat(32)}` as const
+  const stranger = privateKeyToAccount(strangerKey)
+  const kmsConfig = () =>
+    ConfigService.from({
       ...environment('ecrecoverRatifier'),
       MAKER_PRIVATE_KEY: undefined,
       MAX_RATIFICATION_GAS: undefined,
@@ -534,51 +605,107 @@ describe('quoter kernel identity', () => {
       AWS_REGION: 'eu-west-1',
       SIGNER_NATIVE_RESERVE_WEI: '10'
     })
-    expect(() => quoterKernelSpec({ config, account: maker })).toThrow(
-      expect.objectContaining({ operation: 'signer-identity-mismatch' })
+  const kmsSigner = (key: PrivateKeyAccount) =>
+    loadQuoterSigner(
+      {
+        readOnly: false,
+        maker: maker.address,
+        method: 'aws',
+        keyId: 'alias/quoter',
+        region: 'eu-west-1'
+      },
+      { kms: localKms(key) }
     )
-    const delegate = privateKeyToAccount(`0x${'22'.repeat(32)}`)
-    expect(quoterKernelSpec({ config, account: delegate }).signer).toBe(delegate.address)
+
+  test('refuses a local signer that is not the configured maker', async () => {
+    const signer = await loadQuoterSigner({
+      readOnly: false,
+      maker: stranger.address,
+      method: 'private-key',
+      privateKey: strangerKey
+    })
+    const config = ConfigService.from(environment('setterRatifier'))
+    expect(() =>
+      quoterKernelSpec({ config, signer, client: createReadClients(config).chain })
+    ).toThrow(expect.objectContaining({ operation: 'signer-identity-mismatch' }))
+  })
+
+  test('refuses a local signer under a KMS configuration, and accepts a KMS delegate', async () => {
+    const config = kmsConfig()
+    expect(() =>
+      quoterKernelSpec({ config, signer: makerSigner, client: createReadClients(config).chain })
+    ).toThrow(expect.objectContaining({ operation: 'signer-identity-mismatch' }))
+    const delegate = await kmsSigner(stranger)
+    expect(
+      quoterKernelSpec({ config, signer: delegate, client: createReadClients(config).chain }).signer
+    ).toBe(stranger.address)
+  })
+
+  test('refuses a signer it did not load', () => {
+    const config = ConfigService.from(environment('setterRatifier'))
+    const forged = { address: maker.address } as Parameters<typeof quoterKernelSpec>[0]['signer']
+    expect(() =>
+      quoterKernelSpec({ config, signer: forged, client: createReadClients(config).chain })
+    ).toThrow(expect.objectContaining({ operation: 'configuration' }))
   })
 
   test('refuses a read-only configuration', () => {
     const config = ConfigService.from(environment('setterRatifier'), { readOnly: true })
-    expect(() => quoterKernelSpec({ config, account: maker })).toThrow(
-      expect.objectContaining({ operation: 'configuration' })
-    )
+    expect(() =>
+      quoterKernelSpec({ config, signer: makerSigner, client: createReadClients(config).chain })
+    ).toThrow(expect.objectContaining({ operation: 'configuration' }))
+  })
+
+  test('signs with the delegate KMS key', async () => {
+    stubRpc(100_000n)
+    try {
+      const signed = await quoterKernelSpec({
+        config: kmsConfig(),
+        signer: await kmsSigner(stranger),
+        client: createReadClients(kmsConfig()).chain
+      }).hosting.effects.signTx(
+        { kind: 'tx', to: getChainAddress(CHAIN, 'midnight'), data: setConsumed, value: 0n },
+        { nonce: 0, level: 1, kind: 'step', fee: 10n ** 17n, recoveryFee: 10n ** 17n },
+        { signal: new AbortController().signal, mayAct: () => true }
+      )
+      if (signed === 'capped') throw new Error('capped')
+      expect(
+        await recoverTransactionAddress({
+          serializedTransaction: signed.raw as TransactionSerialized
+        })
+      ).toBe(stranger.address)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 
-describe('quoter signer account', () => {
+describe('quoter signer', () => {
   const privateKey = `0x${'11'.repeat(32)}` as const
   const keyMaker = privateKeyToAccount(privateKey)
   const stranger = privateKeyToAccount(`0x${'22'.repeat(32)}`).address
 
-  test('creates the legacy local private-key signer', async () => {
-    const account = await createSignerAccount({
+  test('exposes only its address, never the account it signs with', async () => {
+    const signer = await loadQuoterSigner({
       readOnly: false,
       maker: keyMaker.address,
       method: 'private-key',
       privateKey
     })
-    expect(account.address).toBe(keyMaker.address)
-    expect(
-      await recoverAddress({
-        hash: hashMessage('legacy'),
-        signature: await account.signMessage({ message: 'legacy' })
-      })
-    ).toBe(keyMaker.address)
+    expect(signer).toStrictEqual({ address: keyMaker.address })
+    expect(Object.getOwnPropertySymbols(signer)).toHaveLength(0)
+    expect(Object.isFrozen(signer)).toBe(true)
   })
 
   test('rejects a local private key that does not derive the configured maker', async () => {
     await expect(
-      createSignerAccount({ readOnly: false, maker: stranger, method: 'private-key', privateKey })
+      loadQuoterSigner({ readOnly: false, maker: stranger, method: 'private-key', privateKey })
     ).rejects.toMatchObject({ operation: 'signer-address' })
   })
 
   test('rejects a decrypted keystore that does not derive the configured maker', async () => {
     await expect(
-      createSignerAccount(
+      loadQuoterSigner(
         {
           readOnly: false,
           maker: stranger,
@@ -592,13 +719,8 @@ describe('quoter signer account', () => {
   })
 
   test('rejects an AWS KMS key that derives the funded maker', async () => {
-    const spki = Uint8Array.from([
-      ...Buffer.from('3056301006072a8648ce3d020106052b8104000a034200', 'hex'),
-      ...Buffer.from(keyMaker.publicKey.slice(2), 'hex')
-    ])
-
     await expect(
-      createSignerAccount(
+      loadQuoterSigner(
         {
           readOnly: false,
           maker: keyMaker.address,
@@ -606,7 +728,7 @@ describe('quoter signer account', () => {
           keyId: 'alias/quoter',
           region: 'eu-west-1'
         },
-        { kms: { getPublicKey: async () => spki, signDigest: async () => new Uint8Array() } }
+        { kms: localKms(keyMaker) }
       )
     ).rejects.toMatchObject({ operation: 'signer-address' })
   })
@@ -632,5 +754,87 @@ describe('quoter kernel log', () => {
     createKernelLog(event => void events.push(event))([...resolved(7, true), ...resolved(8, false)])
 
     expect(events).toHaveLength(2)
+  })
+})
+
+/** A JSON-RPC endpoint serving one block at every tag, and `balance` for `eth_getBalance`. */
+const rpcServing = async (balance: () => Hex) => {
+  const block = {
+    number: '0x64',
+    hash: `0x${'ab'.repeat(32)}`,
+    parentHash: `0x${'cd'.repeat(32)}`,
+    timestamp: '0x6900f000',
+    transactions: []
+  }
+  const server = createServer((incoming, outgoing) => {
+    let body = ''
+    incoming.on('data', chunk => (body += chunk))
+    incoming.on('end', () => {
+      const { id, method } = JSON.parse(body) as { id: number; method: string }
+      const reply = (fields: object) => {
+        outgoing.writeHead(200, { 'content-type': 'application/json' })
+        outgoing.end(JSON.stringify({ jsonrpc: '2.0', id, ...fields }))
+      }
+      if (method !== 'eth_getBalance') return reply({ result: block })
+      try {
+        reply({ result: balance() })
+      } catch (error) {
+        reply({ error: { code: -32000, message: (error as Error).message } })
+      }
+    })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    [Symbol.asyncDispose]: async () => {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  }
+}
+
+describe("the signer's balance", () => {
+  const polledHead = async (rpcUrl: string) => {
+    const events: MonitoringEvent[] = []
+    const config = ConfigService.from({ ...environment('ecrecoverRatifier'), RPC_URL: rpcUrl })
+    const { hosting } = quoterKernelSpec({
+      config,
+      signer: makerSigner,
+      client: createReadClients(config).chain,
+      writeEvent: event => void events.push(event)
+    })
+    await hosting.chain.latest()
+    return events
+  }
+
+  test('is reported on a polled head', async () => {
+    await using rpc = await rpcServing(() => '0x14d1120d7b160000')
+    const events = await polledHead(rpc.url)
+
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: 'signer.balance',
+          address: maker.address,
+          balanceEth: 1.5
+        })
+      )
+    )
+  })
+
+  test('is reported as failed without the read error', async () => {
+    await using rpc = await rpcServing(() => {
+      throw new Error('upstream https://secret.example/key refused')
+    })
+    const events = await polledHead(rpc.url)
+
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({ event: 'signer.balance_failed', status: 'failed' })
+      )
+    )
+    expect(
+      JSON.stringify(events, (_, v: unknown) => (typeof v === 'bigint' ? `${v}` : v))
+    ).not.toContain('secret')
   })
 })

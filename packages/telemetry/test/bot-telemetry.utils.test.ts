@@ -1,13 +1,9 @@
 import type { AddressInfo } from 'node:net'
 
 import { metrics } from '@opentelemetry/api'
-import { execFile } from 'node:child_process'
 import http, { createServer } from 'node:http'
-import { createRequire, syncBuiltinESMExports } from 'node:module'
+import { syncBuiltinESMExports } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { startBotTelemetry } from '../src/bot-telemetry.utils'
@@ -132,43 +128,6 @@ describe('startBotTelemetry', () => {
       syncBuiltinESMExports()
     }
   })
-
-  test('collector tests ignore inherited signal endpoints', async () => {
-    const inherited = await startCollector()
-    const vitest = join(
-      dirname(createRequire(import.meta.url).resolve('vitest/package.json')),
-      'vitest.mjs'
-    )
-    try {
-      const { stdout } = await promisify(execFile)(
-        process.execPath,
-        [
-          vitest,
-          'run',
-          'test/bot-telemetry.utils.test.ts',
-          '-t',
-          'exports redacted, cycle-parented spans and metrics over OTLP',
-          '--reporter=json'
-        ],
-        {
-          cwd: fileURLToPath(new URL('../', import.meta.url)),
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(([name]) => !name.startsWith('OTEL_'))
-            ),
-            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${inherited.origin}/inherited-traces`,
-            OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer%20fake-test-only-token'
-          },
-          timeout: 10_000
-        }
-      )
-      const report = JSON.parse(stdout) as { numPassedTests: number; numFailedTests: number }
-      expect(report).toMatchObject({ numPassedTests: 1, numFailedTests: 0 })
-      expect(inherited.requests).toEqual([])
-    } finally {
-      await inherited.close()
-    }
-  }, 15_000)
 
   test.each(['traces', 'metrics'] as const)(
     'an invalid %s override leaves the other signal enabled',

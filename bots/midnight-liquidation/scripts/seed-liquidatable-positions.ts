@@ -21,7 +21,7 @@
  * is this tool's OWN swap-route file (it needs a WETH route to fund the seed swaps); it is unrelated
  * to the bot's runtime, which no longer uses a swap-config file:
  *   RPC_URL=... PRIVATE_KEY_LENDER=0x... PRIVATE_KEY_BORROWER=0x... \
- *     pnpm --filter @morpho-org/midnight-liquidation run seed:positions -- \
+ *     bun run --filter @morpho-org/midnight-liquidation seed:positions -- \
  *       --config ./swap.config.json --pair WETH/USDC --count 100 --drawdown-bps 0 --dry-run
  *
  * Never prints secrets (keys, full RPC URL).
@@ -217,7 +217,7 @@ async function loadTakeSample(
   if (tx.error || !tx.data.input) return null
   const decoded = tryCatch(() => decodeFunctionData({ abi: MidnightAbi, data: tx.data.input }))
   if (decoded.error || decoded.data.functionName !== 'take') return null
-  const offer = decoded.data.args[0] as unknown as Offer
+  const offer = decoded.data.args[0]
   const ratifierData = decoded.data.args[1]
   const cp = offer.market.collateralParams.find(c => isAddressEqual(c.token, collateral))
   if (!cp || !isAddressEqual(offer.market.loanToken, loan)) return null
@@ -375,12 +375,12 @@ async function resolveReference({
   logger: ReturnType<typeof createLogger>
 }): Promise<{ cp: CollateralParams; ratifier: Address }> {
   if (args.referenceMarket && args.ratifier) {
-    const market = (await publicClient.readContract({
+    const market = await publicClient.readContract({
       address: MIDNIGHT,
       abi: MidnightAbi,
       functionName: 'toMarket',
       args: [args.referenceMarket]
-    })) as Market
+    })
     const cp = market.collateralParams.find(c => isAddressEqual(c.token, collateral.address))
     if (!cp) throw new Error(`reference market has no ${collateral.symbol} collateral`)
     if (!isAddressEqual(market.loanToken, loan.address))
@@ -651,12 +651,12 @@ async function main() {
   // re-derives its id. A match proves MARKET_TUPLE + the id hashing (incl. the new chainId/midnight
   // fields and liquidationCursor) are correct, hence the seeded positions' ids are too.
   if (args.referenceMarket) {
-    const refMarket = (await publicClient.readContract({
+    const refMarket = await publicClient.readContract({
       address: MIDNIGHT,
       abi: MidnightAbi,
       functionName: 'toMarket',
       args: [args.referenceMarket]
-    })) as Market
+    })
     const derived = toId(refMarket)
     if (derived.toLowerCase() !== args.referenceMarket.toLowerCase()) {
       throw new Error(

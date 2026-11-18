@@ -1,7 +1,6 @@
 import type { Hex } from 'viem'
 
 import { MathLib } from '@morpho-org/morpho-ts'
-import { createPublicClient, http } from 'viem'
 
 import type { Read } from '../../application/engine/readings'
 import type { OperatorAdapterErrorClass } from '../../application/monitoring/operator-error-name.utils'
@@ -14,7 +13,6 @@ import {
   adapterOperationField,
   operatorErrorName
 } from '../../application/monitoring/operator-error-name.utils'
-import { supportedChain } from '../../config/supported-chains.utils'
 import { MATURITY_PREMIUM_YEAR_SECONDS as YEAR_SECONDS } from '../../domain/maturity-premium'
 import { BootstrapAdapterError, LadderAdapterError } from '../../errors'
 import { createBlueReferenceReader } from './blue-reference-reader.utils'
@@ -157,9 +155,13 @@ export const createReferenceRates = (parameters: {
 /**
  * The production reference rates: each strategy's configured targets over the archive RPC.
  * @param config - Validated runtime config.
+ * @param client - The process's shared reference read client, over the archive RPC.
  * @returns The reference reader; no request is made until it is called.
  */
-export const productionReferenceRates = (config: ConfigService): ReferenceRates =>
+export const productionReferenceRates = (
+  config: ConfigService,
+  client: HistoricalBlockReader
+): ReferenceRates =>
   createReferenceRates({
     targets: {
       ladder: new Map(config.ladder.map(item => [item.marketId, item.targetRate] as const)),
@@ -167,12 +169,7 @@ export const productionReferenceRates = (config: ConfigService): ReferenceRates 
     },
     reader: createBlueReferenceReader(
       config.setup.referenceMarketId ?? config.setup.marketIds[0]!,
-      createPublicClient({
-        chain: supportedChain(config.chainId),
-        transport: http(config.referenceRpcUrl ?? config.rpcUrl, {
-          timeout: config.requestTimeoutMs
-        })
-      }) as HistoricalBlockReader,
+      client,
       config.chainId
     ),
     lookbackSeconds: config.referenceLookbackSeconds

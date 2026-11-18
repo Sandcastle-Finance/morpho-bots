@@ -335,13 +335,15 @@ describe('a deadline while a send is being included', () => {
     expect(rebroadcastsAt(h, 1_500)).toBeGreaterThan(1)
   })
 
+  const otherFailed: Observation = { id: OTHER, unavailable: 'failed' }
+  const factFailed: Observation = { id: FACT, unavailable: 'failed' }
   it.each([
-    ['before', [seen(10_000), { id: OTHER, unavailable: 'failed' } as Observation]],
-    ['after', [{ id: OTHER, unavailable: 'failed' } as Observation, seen(10_000)]],
+    ['before', [seen(10_000), otherFailed]],
+    ['after', [otherFailed, seen(10_000)]],
     ['beside a changed one', [seen(10_000), seen(10_000, 'v2', OTHER)]],
     [
       'of a fact the same batch also read as failed',
-      [{ id: FACT, unavailable: 'failed' } as Observation, seen(10_000), seen(10_000, 'v1', OTHER)]
+      [factFailed, seen(10_000), seen(10_000, 'v1', OTHER)]
     ]
   ])('is never extended by an equal read %s one that no longer holds', (_order, batch) => {
     const h = included()
@@ -429,7 +431,12 @@ describe('the deadline of a stage', () => {
 
   it('stalls an advance that names no deadline, and leaves the plan parked', () => {
     const h = parked(10_000)
-    h.advance('q', { evidence: [fact(h)], notAfter: undefined, observations: [seen()] } as never)
+    const unbounded: Parameters<typeof h.advance>[1] = {
+      evidence: [fact(h)],
+      notAfter: undefined,
+      observations: [seen()]
+    }
+    h.advance('q', unbounded)
     expect(h.notices('q').at(-1)).toBe('stalled')
     expect(h.lastReason('q')).toBe('basis block and expiry must be non-negative safe integers')
     expect(h.state.plans.q?.phase).toBe('awaiting-advance')

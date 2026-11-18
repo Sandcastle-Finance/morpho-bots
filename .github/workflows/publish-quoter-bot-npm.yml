@@ -10,7 +10,7 @@ name: Publish quoter-bot npm
 # newer release tag landing in the seconds between that fetch and the alias moving. A wrong `latest`
 # or `next` from that window self-heals on the next publish, or by dispatching the newer release
 # tag. The artifact is staged by
-# `pnpm --filter @morpho-org/quoter-bot run npm:pack`: one self-contained bundle plus a generated
+# `bun run --cwd bots/quoter-bot npm:pack`: one self-contained bundle plus a generated
 # dependency-free manifest (bots/quoter-bot/scripts/pack-npm.ts).
 #
 # Authentication uses npm trusted publishing (OIDC), so CI stores no npm token and npm generates
@@ -24,7 +24,7 @@ name: Publish quoter-bot npm
 # Operational notes:
 # - npm cannot create a brand-new package through trusted publishing. The first-ever publish is a
 #   one-time manual bootstrap by a maintainer:
-#   `pnpm --filter @morpho-org/quoter-bot run npm:pack && npm publish bots/quoter-bot/dist/npm`,
+#   `bun run --cwd bots/quoter-bot npm:pack && npm publish bots/quoter-bot/dist/npm`,
 #   then configure the trusted publisher above.
 # - The published version comes from bots/quoter-bot/package.json. Published versions are
 #   immutable, and a release whose version already exists on the registry completes as a no-op —
@@ -131,7 +131,7 @@ jobs:
           npm --version
 
       - name: Stage npm package
-        run: pnpm --filter @morpho-org/quoter-bot run npm:pack
+        run: bun run --cwd bots/quoter-bot npm:pack
 
       # The staged bundle must run and report the exact version the manifest declares before it may
       # be published.
@@ -163,7 +163,7 @@ jobs:
           # details) and this log is public — branch on it, never print it.
           if ! npm view '@morpho-org/quoter' name >/dev/null 2>"$view_error"; then
             if grep -q 'E404' "$view_error"; then
-              echo "::error::@morpho-org/quoter does not exist on the registry. Trusted publishing cannot create a package; bootstrap once manually: pnpm --filter @morpho-org/quoter-bot run npm:pack && npm publish bots/quoter-bot/dist/npm"
+              echo "::error::@morpho-org/quoter does not exist on the registry. Trusted publishing cannot create a package; bootstrap once manually: bun run --cwd bots/quoter-bot npm:pack && npm publish bots/quoter-bot/dist/npm"
             else
               echo '::error::unexpected npm registry failure while checking the package; rerun after checking registry status'
             fi

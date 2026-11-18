@@ -25,6 +25,21 @@ describe('budgetVerdict', () => {
     expect(verdictAfter(budget, failed)).toEqual({ ok: false, halt: 'ladder' })
   })
 
+  test('never charges a redemption, decided, failed or settled, nor clears a quote failure', () => {
+    const redeeming: Cycle = {
+      counted: [
+        { workflow: 'ladder', marketId, status: 'failed', stage: 'redeem' },
+        { workflow: 'ladder', marketId, status: 'observed', action: 'queued', redeemedUnits: 40n },
+        { workflow: 'ladder', marketId, status: 'applied', action: 'redeem', redeemedUnits: 40n }
+      ],
+      completed: []
+    }
+    let budget: FailureBudget = foldBudget(EMPTY_BUDGET, failed)
+    for (let poll = 0; poll < 10; poll += 1) budget = foldBudget(budget, redeeming)
+    expect(budget.ladder.counts).toEqual({ [marketId]: 1 })
+    expect(budgetVerdict(budget)).toEqual({ ok: true })
+  })
+
   test('charges a failed cancellation, as a rate-out-of-range withholding sends, to the budget instead of halting at once', () => {
     const cancelFailed: Cycle = {
       counted: [

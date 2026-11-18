@@ -3,6 +3,7 @@ import type { Address, Hex } from 'viem'
 
 import {
   EcrecoverRatifierUtils,
+  type MarketParams,
   MAX_OFFER_CAP,
   midnightAbi,
   type Offer,
@@ -43,7 +44,7 @@ const ratificationPayload = (tree: Tree, chainId: number): TypedPayload => {
     types: typed.types,
     primaryType: typed.primaryType,
     message: typed.message
-  } as TypedPayload
+  }
 }
 
 /** One transaction cancelling every group: a lone `setConsumed`, or a native Midnight multicall of them. */
@@ -69,6 +70,22 @@ export const midnightCancellation = (
     value: 0n
   }
 }
+
+/** Withdraws `units` of the maker's credit in `market`, paid to the maker: the one `withdraw` the validator signs. */
+export const midnightRedemption = (
+  chainId: number,
+  maker: Address,
+  { market, units }: { market: MarketParams; units: bigint }
+): TxPayload => ({
+  kind: 'tx',
+  to: getChainAddress(chainId, 'midnight'),
+  data: encodeFunctionData({
+    abi: midnightAbi,
+    functionName: 'withdraw',
+    args: [market, units, maker, maker]
+  }),
+  value: 0n
+})
 
 /**
  * The plan that publishes a tree: sign its ratification then publish (Ecrecover), or ratify its

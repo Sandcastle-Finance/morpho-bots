@@ -1,5 +1,5 @@
 import type { ReportCommand } from '@repo/kernel'
-import type { JournalRunCap, Logger } from '@repo/kit'
+import type { JournalRunCap, LiveLog, Logger } from '@repo/kit'
 
 import { GraphFailedError } from '@repo/engine'
 import { tryCatch } from '@repo/utils'
@@ -8,9 +8,16 @@ import { revertReason } from './revert.utils'
 
 const STOP_SIGNALS = ['SIGINT', 'SIGTERM'] as const
 
-/** Requests the kernel's clean stop on SIGINT, SIGTERM, or the journal's run cap, and resolves to the exit code. */
+/**
+ * Requests the kernel's clean stop on SIGINT, SIGTERM, or the journal's run cap, drains the live log
+ * once the kernel has stopped, and resolves to the exit code.
+ */
 export async function superviseKernelBot(
-  running: Readonly<{ stop: () => void; stopped: Promise<ReportCommand> }>,
+  running: Readonly<{
+    stop: () => void
+    stopped: Promise<ReportCommand>
+    live: Pick<LiveLog, 'flush'>
+  }>,
   runCapReached: Promise<JournalRunCap>,
   logger: Logger,
   shutdownFields: () => Record<string, unknown>
@@ -29,6 +36,7 @@ export async function superviseKernelBot(
   const stopped = await tryCatch(running.stopped)
   settled = true
   for (const signal of STOP_SIGNALS) process.off(signal, shutdown)
+  running.live.flush()
   if (stopped.error) {
     const failed = stopped.error instanceof GraphFailedError ? stopped.error : undefined
     const report = failed?.stop as ReportCommand | undefined

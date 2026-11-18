@@ -1,4 +1,5 @@
 import type { KernelState } from '@repo/kernel'
+import type { Logger } from '@repo/kit'
 
 import type { MonitoringEvent } from './application/monitoring/monitoring-event'
 import type { SetupStateService } from './application/setup/setup-check.service'
@@ -12,6 +13,7 @@ import type { WorldReads } from './infrastructure/engine/world-reads'
 import type { OfferInvalidation } from './infrastructure/invalidation/offer-invalidation'
 import type { QuoterOwnership } from './infrastructure/kernel/quoter-holdings'
 import type { LadderAdapters } from './infrastructure/ladder/production-ladder'
+import type { ReadClients } from './infrastructure/provider/read-clients'
 import type { ReferenceRates } from './infrastructure/reference/reference-rates'
 
 import { botConfiguredEvents } from './application/monitoring/bot-configured.utils'
@@ -34,10 +36,11 @@ import { createOfferInvalidation } from './infrastructure/invalidation/offer-inv
 import { createQuoterOwnership } from './infrastructure/kernel/quoter-holdings'
 import { readLedgerEntries } from './infrastructure/kernel/quoter-ownership'
 import { requestJson } from './infrastructure/provider/http-json.utils'
+import { createReadClients } from './infrastructure/provider/read-clients'
 import { createChainReader } from './infrastructure/setup-state/chain-reader.utils'
 import { ViemSetupStateService } from './infrastructure/setup-state/viem-setup-state.service'
 import { assertNoLegacyStrategyState } from './infrastructure/strategy-state/strategy-state-file.utils'
-import { createSignerAccount } from './kernel'
+import { loadQuoterSigner } from './kernel'
 import { startQuoterEngine } from './run'
 
 type Environment = Record<string, string | undefined>
@@ -70,10 +73,6 @@ const assertReferenceConfigured = (
   }
 }
 
-const signerAccountAddress = async (
-  identity: Exclude<ConfigService['identity'], { readOnly: true }>
-) => (await createSignerAccount(identity)).address
-
 type Dependencies = {
   createState?: (config: ConfigService) => SetupStateService
   /** Replaces the production ladder preparation, for tests. */
@@ -92,24 +91,22 @@ type Dependencies = {
   cwd?: string
   /** Overrides hidden terminal password input in tests. */
   readPassword?: () => Promise<string>
+  /** Where each engine run ships its live log's `live.*` lines. */
+  liveLogger?: Logger
 }
 
-const defaultState = (config: ConfigService, ownership: QuoterOwnership) => {
+const defaultState = (config: ConfigService, ownership: QuoterOwnership, clients: ReadClients) => {
   const identity = config.identity
   const identityOptions = identity.readOnly
     ? { readOnly: true as const }
     : {
         readOnly: false as const,
-        deriveSignerAddress: () => signerAccountAddress(identity)
+        deriveSignerAddress: async () => (await loadQuoterSigner(identity)).address
       }
 
   return new ViemSetupStateService(
-    createChainReader(config.rpcUrl, config.requestTimeoutMs, config.chainId),
-    createChainReader(
-      config.referenceRpcUrl ?? config.rpcUrl,
-      config.requestTimeoutMs,
-      config.chainId
-    ),
+    createChainReader(clients.chain),
+    createChainReader(clients.reference),
     (url, provider, timeoutMs) =>
       requestJson(url, provider, Math.min(config.requestTimeoutMs, timeoutMs ?? Infinity)),
     {
@@ -222,8 +219,9 @@ export const createApplication = (
     monitorSetup: boolean
   ): Promise<EngineStarter> => {
     const identity = config.identity
+    const clients = createReadClients(config)
     const journal = journalSettings(environment)
-    const account = identity.readOnly ? undefined : await createSignerAccount(identity)
+    const signer = identity.readOnly ? undefined : await loadQuoterSigner(identity)
     const dryEntries = identity.readOnly
       ? await readLedgerEntries(config.chainId, config.setup.maker)
       : undefined
@@ -235,14 +233,15 @@ export const createApplication = (
     return async run => {
       const engine = await startQuoterEngine({
         config,
+        clients,
         strategies,
         journal,
-        ...(account ? { account } : {}),
+        ...(signer ? { signer } : {}),
         ...(writeEvent ? { writeEvent } : {}),
         setup: {
           create: ownership =>
             new SetupCheckService(
-              dependencies.createState?.(config) ?? defaultState(config, ownership),
+              dependencies.createState?.(config) ?? defaultState(config, ownership, clients),
               config.setup,
               config.readOnly,
               requiresVariableRateReference(configurations)
@@ -263,6 +262,7 @@ export const createApplication = (
           : {}),
         ...(dependencies.kernel ? { kernel: dependencies.kernel(config) } : {}),
         ...(dryEntries ? { dryEntries } : {}),
+        ...(dependencies.liveLogger ? { liveLogger: dependencies.liveLogger } : {}),
         signal: run.signal,
         ...(run.until ? { until: run.until } : {})
       })
@@ -276,7 +276,8 @@ export const createApplication = (
       const config = await loadConfig(options)
       assertReferenceConfigured(config, [...config.bootstrap, ...config.ladder])
       const state =
-        dependencies.createState?.(config) ?? defaultState(config, await ledgerOwnership(config))
+        dependencies.createState?.(config) ??
+        defaultState(config, await ledgerOwnership(config), createReadClients(config))
       return new SetupCheckService(
         state,
         config.setup,
@@ -309,21 +310,25 @@ export const createApplication = (
       const config = await loadConfig(options)
       if (dependencies.createInvalidation) return dependencies.createInvalidation(config)
       const identity = config.identity
-      if (identity.readOnly) return createOfferInvalidation(config, {})
+      const clients = createReadClients(config)
+      if (identity.readOnly) return createOfferInvalidation(config, { client: clients.chain })
       const journal = journalSettings(environment)
-      const account = await createSignerAccount(identity)
+      const signer = await loadQuoterSigner(identity)
       const writeEvent = options.writeEvent as MonitoringEventWriter | undefined
       return createOfferInvalidation(config, {
+        client: clients.chain,
         writer: {
-          signer: account.address,
+          signer: signer.address,
           start: run =>
             startQuoterEngine({
               config,
+              clients,
               strategies: { ladder: false, bootstrap: false },
               journal,
-              account,
+              signer,
               ...(writeEvent ? { writeEvent } : {}),
               ...(dependencies.kernel ? { kernel: dependencies.kernel(config) } : {}),
+              ...(dependencies.liveLogger ? { liveLogger: dependencies.liveLogger } : {}),
               ...(run.adopt ? { adopt: run.adopt } : {}),
               ...(run.cancel ? { cancel: run.cancel } : {}),
               ...(run.onStartup ? { onStartup: run.onStartup } : {}),

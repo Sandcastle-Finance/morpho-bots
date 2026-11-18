@@ -148,7 +148,7 @@ test('POSIX abort kills a command descendant that ignores TERM', { timeout: 10_0
     try {
       state = (await readFile(`/proc/${descendantPid}/stat`, 'utf8')).split(' ')[2]
     } catch (error) {
-      if (error.code !== 'ENOENT') throw error
+      if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error
     }
     assert.ok(state === 'missing' || state === 'Z', `descendant remains live in state ${state}`)
   } finally {

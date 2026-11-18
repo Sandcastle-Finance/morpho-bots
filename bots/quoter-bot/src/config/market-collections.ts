@@ -24,7 +24,7 @@ import {
 } from '../errors'
 
 /** Minimal string environment shape used by pure market-id parsing. */
-export type MarketCollectionEnvironment = Record<string, string | undefined>
+type MarketCollectionEnvironment = Record<string, string | undefined>
 
 /**
  * Validates and canonicalizes one browser-safe market identifier without loading runtime providers.

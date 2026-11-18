@@ -41,7 +41,19 @@ const PROPER_NOUNS = new Set([
   'Robinhood',
   'Uniswap',
   'Pendle',
-  'Kubernetes'
+  'Kubernetes',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December'
 ])
 
 /** Sentence case: after the first word, only proper nouns, acronyms, and clause starts are capitalized. */

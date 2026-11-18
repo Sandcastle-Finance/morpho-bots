@@ -17,10 +17,5 @@ describe('address utilities', () => {
     it('should return empty string for empty address', () => {
       expect(abbreviateAddress('')).toBe('')
     })
-
-    it('should handle checksum addresses', () => {
-      const address = '0x1234567890abcdef1234567890abcdef12345678'
-      expect(abbreviateAddress(address)).toBe('0x1234...5678')
-    })
   })
 })

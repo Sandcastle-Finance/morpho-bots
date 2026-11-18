@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "tsx scripts/build.ts",
-    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
-    "probe:lens": "pnpm --filter \"{.}...\" --if-present run build && node --env-file-if-exists=.env dist/scripts/probe-live-lens.js",
+    "prestart": "bun run --filter @repo/contracts build && bun run build",
+    "probe:lens": "bun run --filter @repo/contracts build && bun run build && node --env-file-if-exists=.env dist/scripts/probe-live-lens.js",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
     "test": "vitest run",
     "typecheck": "soltag && tsc --noEmit"
@@ -25,7 +25,8 @@
     "executooor-viem": "catalog:",
     "solc": "catalog:",
     "soltag": "catalog:",
-    "viem": "catalog:"
+    "viem": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@repo/typescript-config": "workspace:*",

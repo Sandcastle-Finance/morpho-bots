@@ -87,29 +87,38 @@ const classifiedEvents = (report: MarketReport): readonly MonitoringEvent[] => {
       : []),
     ...publicationWithheld(report),
     ...(workflow === 'ladder'
-      ? (report.withdrawnSides ?? []).map(
-          (side): MonitoringEvent => ({
-            event: 'guardrail.side-withdrawn',
-            workflow,
-            marketId,
-            side
-          })
-        )
+      ? (report.withdrawnSides ?? []).map((side): MonitoringEvent => ({
+          event: 'guardrail.side-withdrawn',
+          workflow,
+          marketId,
+          side
+        }))
       : []),
     ...(report.facts === undefined
       ? []
       : report.workflow === 'ladder'
         ? ladderFactEvents(marketId, report.facts)
         : bootstrapFactEvents(marketId, report.facts)),
-    ...(report.transactions ?? []).map(
-      (transaction): MonitoringEvent => ({
+    ...(report.transactions ?? []).flatMap((transaction): MonitoringEvent[] => [
+      {
         event: 'transaction.settled',
         workflow,
         marketId,
         operation: transaction.operation,
         txHash: transaction.txHash
-      })
-    )
+      },
+      ...(transaction.operation === 'redeem' && report.redeemedUnits !== undefined
+        ? [
+            {
+              event: 'position.redeemed',
+              workflow,
+              marketId,
+              redeemedUnits: report.redeemedUnits,
+              txHash: transaction.txHash
+            } satisfies MonitoringEvent
+          ]
+        : [])
+    ])
   ]
 }
 

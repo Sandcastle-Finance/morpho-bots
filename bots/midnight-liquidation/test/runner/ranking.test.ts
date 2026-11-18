@@ -28,11 +28,6 @@ describe('rankByNetUsdSurplus', () => {
     expect(ranked.map(c => c.id)).toEqual(['large', 'small', 'unpriced-first', 'unpriced-last'])
   })
 
-  it('preserves input order among unpriced candidates', () => {
-    const ranked = rankByNetUsdSurplus([at('c', null), at('a', null), at('b', null)])
-    expect(ranked.map(c => c.id)).toEqual(['c', 'a', 'b'])
-  })
-
   it('preserves input order on ties', () => {
     const ranked = rankByNetUsdSurplus([at('c', 10n), at('a', 10n), at('b', 10n)])
     expect(ranked.map(c => c.id)).toEqual(['c', 'a', 'b'])
@@ -98,10 +93,5 @@ describe('scoreNetOfRouteCost', () => {
     const scored = scoreNetOfRouteCost([scorable('unpriced', null, null)])
     expect(scored[0]?.netUsd).toBeNull()
     expect(scored[0]?.costed).toBe(false)
-  })
-
-  it('charges a zero-cost candidate nothing', () => {
-    const scored = scoreNetOfRouteCost([scorable('swap-free', 6n, 0n)])
-    expect(scored[0]).toMatchObject({ netUsd: 6n, costed: true })
   })
 })

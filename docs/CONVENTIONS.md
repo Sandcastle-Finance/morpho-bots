@@ -92,7 +92,8 @@ instead.
 - **Log shapes are not a contract.** No test pins a log line's event name, fields or shape: no
   snapshots of log output, no exact field sets. A BetterStack dashboard or query that parses a field
   never blocks a rename or a simplification. Change the log, and say in the PR which dashboards to
-  update.
+  update. The one exception is the `live.*` lines, a protocol versioned by their `v` field between
+  `@repo/kit`'s live log and the live view; still, no bot test pins one.
 - **`tx.included` is not final.** Kernel bots log a successful receipt as `tx.included`
   (`@repo/kit`'s tx reporter); a reorg can still undo the inclusion.
 - **Promises**: Use `tryCatch` from `@repo/utils` to handle promise throws.
@@ -185,4 +186,4 @@ Avoid these patterns that produce tests that pass but verify nothing useful:
 ## Dependencies
 
 - **A dependency change is verified by a build**, not by typecheck alone: bundle the affected bots,
-  and run `pnpm build` where soltag lenses are involved.
+  and run `bun run build` where soltag lenses are involved.

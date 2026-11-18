@@ -203,11 +203,12 @@ export async function readDeploylessBatchLens<
 
   if (args.length === 0) return new Map()
 
-  const abiItem = getAbiItem({
+  const lookup: GetAbiItemParameters = {
     abi: parameters.abi,
     name: parameters.functionName,
     args: [args[0]]
-  } as GetAbiItemParameters) as AbiFunction
+  }
+  const abiItem = getAbiItem(lookup) as AbiFunction
   const humanReadableAbiItem = formatAbiItem(abiItem)
 
   if (abiItem.inputs.length !== 1) {
@@ -230,7 +231,7 @@ export async function readDeploylessBatchLens<
   // bounded by the provider's request size and the frame's gas — never by EIP-3860. A provider that
   // ignores overrides is detected on the opening wave and its range re-fetched as initcode, which
   // the chain's own initcode limit bounds.
-  const _batch = {
+  const lensBatch = {
     compress: false as const,
     envelope: 'override' as const,
     ...omit(batch ?? {}, ['gas']),
@@ -257,7 +258,7 @@ export async function readDeploylessBatchLens<
                 delta
               }
             : undefined,
-        batch: _batch,
+        batch: lensBatch,
         abi: wireAbiItem
       })
     ]

@@ -248,6 +248,33 @@ describe('an untrusted plan cannot hide or understate a commitment', () => {
     })
   })
 
+  it('a dependent step cannot sign a commitment admitted on inclusion, so a ratification that never executes cannot retire a released offer', () => {
+    const h = new Harness().start()
+    const ratified = tree(offer('g1', 300n, { ratifier: W.setter }))
+    h.send({
+      type: 'Submit',
+      plan: {
+        intentId: 'q',
+        steps: [
+          { kind: 'sign' },
+          { kind: 'tx', payload: ratify(treeRoot(ratified)), witness: ratified },
+          { kind: 'release' }
+        ],
+        notAfter: 1_000_000,
+        basisBlock: 0
+      }
+    })
+    expect(h.entry(G1)?.spec.exposure).toBe('inclusion')
+    const [command] = h.pending('materialize')
+    h.send({ type: 'Materialized', request: command!.request, payload: signTree(T), witness: T })
+    expect(h.commands('notify').at(-1)).toMatchObject({
+      notice: 'abandoned',
+      reason: `creates ${G1} with an exposure other than admitted`
+    })
+    expect(h.commands('sign')).toHaveLength(0)
+    expect(h.available(W.loan)).toBe(1000n)
+  })
+
   it('the tree root binds the loan token, so evidence cannot re-point a reservation', () => {
     const h = new Harness().start()
     const real = tree(offer('g1', 300n, { ratifier: W.setter, loanToken: '0xWETH' }))

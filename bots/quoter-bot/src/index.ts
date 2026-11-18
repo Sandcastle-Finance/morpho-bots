@@ -80,7 +80,7 @@ const entrypointObservability = recordObserver
 
 try {
   process.exitCode = await runQuoterBotEntrypoint(
-    createApplication(),
+    createApplication(process.env, monitoringLogger ? { liveLogger: monitoringLogger } : {}),
     enhanceVerboseArgv(process.argv.slice(2), {
       env: process.env,
       hasAdditionalSink: telemetry.enabled

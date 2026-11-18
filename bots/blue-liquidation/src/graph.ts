@@ -1,5 +1,5 @@
-import type { Backoff, BackoffPolicy } from '@repo/controller'
-import type { Budget, Keyed, KeyedWrite } from '@repo/engine'
+import type { Backoff } from '@repo/controller'
+import type { Keyed, KeyedWrite } from '@repo/engine'
 import type { KernelHostOptions } from '@repo/kernel'
 import type { Logger } from '@repo/kit'
 
@@ -15,15 +15,20 @@ import {
   UNREAD,
   watch
 } from '@repo/engine'
+import { declareLiveLog } from '@repo/kit'
 
 import type { PositionReading } from './liquidation'
 import type { PrepareDeps } from './prepare'
+import type { LiquidatorSettings } from './settings'
 import type { PositionQuote, QuoteDeps, QuoteRequest, RouteQuote, WorldDeps } from './sources'
 import type { TickStats } from './stats'
 
+import { encodeLiquidationExec } from './execution/encode-call'
+import { liquidatorKernelConfig } from './kernel'
 import { liquidationTask, sizePosition, unhealthiness } from './liquidation'
 import { createPositionPreparer } from './prepare'
 import { createReporter } from './report'
+import { parseLiquidatorSettings } from './settings'
 import { covers, deferredQuote, quotesDue, quotesGone, readPositions, readQuote } from './sources'
 
 /** World reads queued behind the one in flight; a read for a head the kernel has passed is skipped. */
@@ -34,33 +39,20 @@ const PREPARE_QUEUE = 64
 const PREPARE_TIMEOUT_MS = 10_000
 /** A firm quote with its retries. */
 const QUOTE_TIMEOUT_MS = 20_000
+export const LIQUIDATOR_GRAPH = 'blue-liquidation'
 
-export type LiquidatorOptions = Readonly<{
-  kernel: Omit<KernelHostOptions, 'requests' | 'facts' | 'onActivity'>
+/** What the liquidator reaches outside its graph; a replay runs none of it. */
+export type LiquidatorDeps = Readonly<{
+  /** The kernel's chain, ledger and effects; its config and enrollment come from the settings. */
+  kernel: Omit<KernelHostOptions, 'config' | 'enrollment' | 'requests' | 'facts' | 'onActivity'>
   world: Omit<WorldDeps, 'logger'>
-  /** How long a world read authorizes liquidations, from when it started. */
-  worldValidMs: number
-  quotes: Omit<QuoteDeps, 'timeoutMs' | 'backoff' | 'stats' | 'logger'> &
-    Readonly<{
-      /** How long a route authorizes liquidations, and so how often a liquidatable position is quoted. */
-      validForMs: number
-      /** How long a position waits to be quoted again after its quote found no path. */
-      retryMs: number
-    }>
-  prepare: Omit<PrepareDeps, 'stats' | 'logger'>
-  /** How many quotes run at once, and how many may start in a window. */
-  venue: Readonly<{ concurrency: number; budget?: Budget }>
-  /** How many preparations simulate at once. */
-  simulations: number
-  /** Spaces a position's failed preparations, refused acts and failed quotes alike. */
-  backoff: BackoffPolicy
-  /** Names this run in its intent ids, so a restart's acts never collide with an earlier run's. */
-  runId: string
-  /** How many native reservations the kernel's caps allow. */
-  maxReservations: number
+  quoteFor: QuoteDeps['quoteFor']
+  simulate: PrepareDeps['simulate']
   stats: TickStats
   logger: Logger
 }>
+
+type Declared = Readonly<{ settings: LiquidatorSettings; deps: LiquidatorDeps }>
 
 /**
  * The liquidator: each new head is a world read of every liquidatable position; each one with a
@@ -71,17 +63,22 @@ export type LiquidatorOptions = Readonly<{
  * reserved nor a conflict: simulation and the Executor's onchain bounds stop a squeezed route, at
  * the cost of gas.
  */
-export const declareLiquidator = defineBot('blue-liquidation', (b, o: LiquidatorOptions) => {
-  const { logger, stats } = o
+const declare = defineBot(LIQUIDATOR_GRAPH, (b, { settings, deps }: Declared) => {
+  const { logger, stats } = deps
   const reporter = createReporter({ stats, logger })
-  const kernel = b.kernel({ ...o.kernel, onActivity: reporter.reportActivity })
+  const kernel = b.kernel({
+    ...deps.kernel,
+    config: liquidatorKernelConfig(settings),
+    enrollment: settings.kernel.enrollment,
+    onActivity: reporter.reportActivity
+  })
   const world = b.source('world', {
     level: 'positions',
     at: 'head',
     queue: WORLD_QUEUE,
-    validForMs: o.worldValidMs,
+    validForMs: settings.worldValidMs,
     logger,
-    read: readPositions({ ...o.world, stats, logger })
+    read: readPositions({ ...deps.world, stats, logger })
   })
   const positions = world.level
   const { writes, quotes } = b.raw(g =>
@@ -124,14 +121,29 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
     candidates,
     facts: [liquidatable, route],
     inputs,
-    runId: o.runId,
-    maxReservations: o.maxReservations,
-    backoff: o.backoff,
+    runId: settings.runId,
+    maxReservations: settings.maxReservations,
+    backoff: settings.backoff,
     policy: liquidationTask,
     prepare: {
-      lane: lane('simulation', { concurrency: o.simulations, queue: PREPARE_QUEUE }),
+      lane: lane('simulation', { concurrency: settings.simulations, queue: PREPARE_QUEUE }),
       timeoutMs: PREPARE_TIMEOUT_MS,
-      handle: createPositionPreparer({ ...o.prepare, stats, logger })
+      handle: createPositionPreparer({
+        executor: settings.executor,
+        encode: (market, borrower, seizedAssets, plan) =>
+          encodeLiquidationExec({
+            executor: settings.executor,
+            morpho: settings.morpho,
+            market,
+            seizedAssets,
+            borrower,
+            plan,
+            recipient: settings.account
+          }),
+        simulate: deps.simulate,
+        stats,
+        logger
+      })
     }
   })
   const { backoff } = liquidations
@@ -150,6 +162,8 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
         },
         compute: ({ view, backoff }) => ({ busy: view.busy, backoff })
       })
+      const unreadPositions: Keyed<PositionReading> = UNREAD
+      const unreadQuotes: Keyed<PositionQuote> = UNREAD
       s.fold('schedule', {
         reads: {
           positions: watch(positions),
@@ -159,10 +173,10 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
         },
         emits: [requests],
         initial: {
-          positions: UNREAD as Keyed<PositionReading>,
+          positions: unreadPositions,
           busy: [] as readonly string[],
           backoff: undefined as Backoff | undefined,
-          quotes: UNREAD as Keyed<PositionQuote>,
+          quotes: unreadQuotes,
           quoting: [] as readonly string[],
           changed: false
         },
@@ -192,7 +206,7 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
           const due = quotesDue(state.positions, state.quotes, {
             held: [...state.quoting, ...state.busy],
             ...(state.backoff && { backoff: state.backoff }),
-            slots: o.venue.concurrency - state.quoting.length,
+            slots: settings.venue.concurrency - state.quoting.length,
             now: stamp.at
           })
           return {
@@ -209,15 +223,15 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
         requests: { request: every(requests) },
         samples: { positions, quotes, backoff: backoff.state },
         results: writes,
-        lane: lane('venue', { ...o.venue, queue: o.venue.concurrency }),
+        lane: lane('venue', { ...settings.venue, queue: settings.venue.concurrency }),
         handle: async ({ value: request }, context) => {
           const startedAt = context.now()
           // A preparation may back the key off while its quote waits for the venue budget.
           const quote = isBackedOff(context.samples.backoff(), request.key)
             ? deferredQuote(request)
             : await readQuote(request, {
-                ...o.quotes,
-                backoff: o.backoff,
+                quoteFor: deps.quoteFor,
+                backoff: settings.backoff,
                 timeoutMs: QUOTE_TIMEOUT_MS,
                 stats,
                 logger
@@ -225,13 +239,13 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
           // A route holds from when it was priced; a missing path waits its retry from when it ended.
           const expiry =
             quote.kind === 'route'
-              ? startedAt + o.quotes.validForMs
+              ? startedAt + settings.quotes.validForMs
               : quote.kind === 'no_swap_path'
-                ? context.now() + o.quotes.retryMs
+                ? context.now() + settings.quotes.retryMs
                 : undefined
           const gone = quotesGone(context.samples.quotes(), context.samples.positions(), {
             block: request.reading.block,
-            policy: o.backoff
+            policy: settings.backoff
           }).filter(key => key !== request.key)
           context.write({
             coverage: 'carried',
@@ -260,5 +274,21 @@ export const declareLiquidator = defineBot('blue-liquidation', (b, o: Liquidator
       logBackoff(logger, value)
     }
   })
-  return { kernel, positions, liquidatable, quotes, route, candidates, sizing, liquidations }
+  const live = b.raw(g =>
+    declareLiveLog(g, {
+      on: kernel.nodes.tick,
+      show: [{ node: liquidations.phase, label: 'phase' }, kernel.health],
+      run: settings.runId,
+      logger
+    })
+  )
+  return { kernel, positions, liquidatable, quotes, route, candidates, sizing, liquidations, live }
 })
+
+/**
+ * Builds the liquidator from its settings, validated here, so a live run and a replay of its
+ * journal build the same graph.
+ * @throws InvalidSettingsError, or GraphDefinitionError for a graph the engine refuses.
+ */
+export const declareLiquidator = (settings: LiquidatorSettings, deps: LiquidatorDeps) =>
+  declare({ settings: parseLiquidatorSettings(settings), deps })

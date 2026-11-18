@@ -6,7 +6,6 @@ import {
   createDeploylessClient,
   createJournalFileSink,
   createLogger,
-  readJournalFile,
   simulateLiquidationExec
 } from '@repo/kit'
 import { quoteUniswapV3 } from '@repo/swaps'
@@ -22,14 +21,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ForkHandle, TestClient } from './harness'
 
 import { loadConfig } from '../../src/config'
-import { encodeLiquidationExec } from '../../src/execution/encode-call'
 import { expectedLoanOut } from '../../src/execution/swap-step'
+import { LIQUIDATOR_GRAPH } from '../../src/graph'
 import { liquidatorAccount, liquidatorKernel } from '../../src/kernel'
 import { marketId } from '../../src/market'
 import { startLiquidator } from '../../src/run'
 import { isLiquidatable } from '../../src/runner/eligibility'
+import { liquidatorSettings } from '../../src/settings'
 import { readBlueLiquidationLens } from '../../src/state/lens.sol'
 import { createTickStats } from '../../src/stats'
+import { replayFile } from '../scenario/bot'
 import {
   deployExecutor,
   FORK_URL,
@@ -101,6 +102,9 @@ describe.skipIf(!FORK_URL)(
         EXECUTOOOR_ADDRESS: executooor,
         KERNEL_STATE_DIR: stateDirectory,
         KERNEL_ENROLLMENT: 'enrolling',
+        JOURNAL_RUN_CAP_BYTES: '1073741824',
+        BUILD_REVISION: '0d58dd8e5',
+        BUILD_IMAGE_TAG: 'test',
         MAX_FEE_GWEI,
         ALLOW_DETECTION_ONLY: 'true'
       })
@@ -112,13 +116,23 @@ describe.skipIf(!FORK_URL)(
       expect(reading && isLiquidatable(reading), 'the seeded position reads as liquidatable').toBe(
         true
       )
-      const kernel = liquidatorKernel({ config, account, logger })
+      const settings = {
+        ...liquidatorSettings(config, { account: account.address, runId: runIdAt(Date.now()) }),
+        venue: { concurrency: 1 },
+        simulations: 1,
+        maxReservations: 1,
+        quotes: { validForMs: 30_000, retryMs: 1_000 },
+        backoff: { baseBlocks: 1, maxBlocks: 4 }
+      }
+      const kernel = liquidatorKernel(settings, { config, account, logger })
       const journal = await createJournalFileSink({
         directory: join(stateDirectory, 'journal'),
-        graph: 'blue-liquidation',
+        graph: LIQUIDATOR_GRAPH,
         build: { revision: 'f0f0f0', imageTag: 'fork-test' },
         capacityBytes: JOURNAL_CAPACITY_BYTES,
-        runCapBytes: JOURNAL_RUN_CAP_BYTES
+        runCapBytes: JOURNAL_RUN_CAP_BYTES,
+        runId: settings.runId,
+        settings
       })
       const balanceOf = (token: Address, holder: Address) =>
         test.readContract({
@@ -129,7 +143,7 @@ describe.skipIf(!FORK_URL)(
         })
       const loanBefore = await balanceOf(MARKET.loanToken, LIQUIDATOR)
 
-      const bot = await startLiquidator({
+      const bot = await startLiquidator(settings, {
         journal: journal.journal,
         kernel: kernel.live,
         world: {
@@ -139,64 +153,41 @@ describe.skipIf(!FORK_URL)(
           }),
           readLens: (pairs, at) => readBlueLiquidationLens(client, MORPHO, pairs, at.hash as Hex)
         },
-        worldValidMs: config.worldValidMs,
-        quotes: {
-          quoteFor: async (plan, out) => {
-            const swap = quoteUniswapV3(
-              { router: SWAP_ROUTER_02, fee: POOL_FEE },
-              {
-                chainId: base.id,
-                tokenIn: out.params.collateralToken,
-                tokenOut: out.params.loanToken,
-                amountIn: plan.seizedAssets,
-                slippageBps: SLIPPAGE_BPS,
-                // The suite drives one venue directly, so it asks for no economic floor.
-                minAcceptableAmountOut: 0n,
-                executor: executooor,
-                referenceAmountOut: expectedLoanOut(plan, out)
-              }
-            )
-            return {
-              kind: 'swap',
-              plan: {
-                steps: [
-                  {
-                    tokenIn: out.params.collateralToken,
-                    tokenOut: out.params.loanToken,
-                    target: swap.target,
-                    value: swap.value,
-                    callData: swap.callData,
-                    amountIn: swap.amountIn,
-                    approvalSpender: swap.spender
-                  }
-                ],
-                expectedAmountOut: swap.expectedAmountOut,
-                amountOutMinimum: swap.amountOutMinimum
-              }
-            }
-          },
-          validForMs: 30_000,
-          retryMs: 1_000
-        },
-        prepare: {
-          executor: executooor,
-          encode: (market, positionBorrower, seizedAssets, plan) =>
-            encodeLiquidationExec({
+        quoteFor: async (plan, out) => {
+          const swap = quoteUniswapV3(
+            { router: SWAP_ROUTER_02, fee: POOL_FEE },
+            {
+              chainId: base.id,
+              tokenIn: out.params.collateralToken,
+              tokenOut: out.params.loanToken,
+              amountIn: plan.seizedAssets,
+              slippageBps: SLIPPAGE_BPS,
+              // The suite drives one venue directly, so it asks for no economic floor.
+              minAcceptableAmountOut: 0n,
               executor: executooor,
-              morpho: MORPHO,
-              market,
-              seizedAssets,
-              borrower: positionBorrower,
-              plan,
-              recipient: LIQUIDATOR
-            }),
-          simulate: data => simulateLiquidationExec(client, { executooor, eoa: LIQUIDATOR, data })
+              referenceAmountOut: expectedLoanOut(plan, out)
+            }
+          )
+          return {
+            kind: 'swap',
+            plan: {
+              steps: [
+                {
+                  tokenIn: out.params.collateralToken,
+                  tokenOut: out.params.loanToken,
+                  target: swap.target,
+                  value: swap.value,
+                  callData: swap.callData,
+                  amountIn: swap.amountIn,
+                  approvalSpender: swap.spender
+                }
+              ],
+              expectedAmountOut: swap.expectedAmountOut,
+              amountOutMinimum: swap.amountOutMinimum
+            }
+          }
         },
-        venue: { concurrency: 1 },
-        simulations: 1,
-        backoff: { baseBlocks: 1, maxBlocks: 4 },
-        runId: runIdAt(Date.now()),
-        maxReservations: 1,
+        simulate: data => simulateLiquidationExec(client, { executooor, eoa: LIQUIDATOR, data }),
         stats: createTickStats(),
         logger
       })
@@ -234,7 +225,7 @@ describe.skipIf(!FORK_URL)(
       expect(others).toStrictEqual([])
       const ledger = await createLedgerStore(join(stateDirectory, ledgerFile!.name)).read()
       expect(ledger).toMatchObject({ nextNonce: sentCount, nonces: {} })
-      expect(await readJournalFile(journal.path)).toMatchObject({ status: 'clean' })
+      expect(await replayFile(journal.path)).toBeGreaterThan(0)
 
       expect(await balanceOf(MARKET.loanToken, LIQUIDATOR)).toBeGreaterThan(loanBefore)
       expect(await balanceOf(MARKET.loanToken, executooor)).toBe(0n)

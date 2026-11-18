@@ -1,18 +1,15 @@
 import type { KernelHead } from '@repo/kernel'
-import type { SwapPlan, Venue } from '@repo/swaps'
-import type { Address, Hex } from 'viem'
+import type { Venue } from '@repo/swaps'
+import type { Hex } from 'viem'
 
 import { runIdAt } from '@repo/controller'
 import {
   assertContractDeployed,
-  buildIdentityFromEnv,
   createBalanceMonitor,
   createDeploylessClient,
   createHeartbeatMonitor,
   createJournalFileSink,
   createLogger,
-  parseJournalRunCapBytes,
-  TRANSACTION_KERNEL_RESERVATIONS,
   simulateLiquidationExec,
   withLogging
 } from '@repo/kit'
@@ -29,43 +26,34 @@ import { join } from 'node:path'
 import { erc20Abi } from 'viem'
 import { getBalance, readContract } from 'viem/actions'
 
-import type { Market } from './execution/encode-call'
-import type { LiquidationPlan } from './sizing/plan'
 import type { LensInput } from './state/lens.sol'
 
 import { loadConfig } from './config'
-import {
-  LISTED_MARKETS_MAX_AGE_MS,
-  TOKEN_PRICES_REFRESH_MS,
-  TOKEN_PRICES_VALID_MS
-} from './constants'
 import { createApiCandidateSource, discoverBorrowers } from './discovery/borrowers'
 import { createListedMarketFilter, createUnionListedMarketFilter } from './discovery/markets'
 import { createTokenPriceSource } from './discovery/token-prices'
-import { encodeLiquidationExec } from './execution/encode-call'
-import { liquidationFees, liquidatorAccount, liquidatorKernel } from './kernel'
+import { LIQUIDATOR_GRAPH } from './graph'
+import { chainFeeReads, liquidatorAccount, liquidatorKernel } from './kernel'
 import { composeQuoting } from './quotes'
 import { revertReason } from './revert.utils'
 import { startLiquidator } from './run'
 import { createPlanSkipLog } from './runner/plan-skip-log'
+import { liquidatorSettings } from './settings'
 import { readMidnightLiquidationLens } from './state/lens.sol'
 import { createTickStats } from './stats'
 import { superviseKernelBot } from './supervise'
 
-/** How many positions quote and simulate at once. */
-const PREPARE_CONCURRENCY = 4
-
 const JOURNAL_CAPACITY_BYTES = 16 * 1024 * 1024
 async function main() {
   const config = loadConfig()
-  const build = buildIdentityFromEnv(process.env)
-  const runCapBytes = parseJournalRunCapBytes(process.env.JOURNAL_RUN_CAP_BYTES)
+  const { build, runCapBytes } = config.kernel.journal
   const logger = createLogger(config.logLevel, {
     context: { bot: 'midnight-liquidation', chainId: config.chainId, ...build }
   })
 
   const account = liquidatorAccount(config)
   const eoa = account.address
+  const settings = liquidatorSettings(config, { account: eoa, runId: runIdAt(Date.now()) })
 
   logger.info('startup', {
     chainId: config.chainId,
@@ -79,7 +67,7 @@ async function main() {
     client,
     config.executooorAddress,
     'EXECUTOOOR_ADDRESS',
-    'deploy it with `pnpm --filter @repo/contracts run deploy:executor`'
+    'deploy it with `bun run --filter @repo/contracts deploy:executor`'
   )
   await assertContractDeployed(client, config.midnight, 'Midnight singleton')
 
@@ -90,7 +78,7 @@ async function main() {
   if (process.env.ZEROX_API_KEY) apiKeys['0x'] = process.env.ZEROX_API_KEY
   if (process.env.ONEINCH_API_KEY) apiKeys['1inch'] = process.env.ONEINCH_API_KEY
   if (process.env.LIFI_API_KEY) apiKeys.lifi = process.env.LIFI_API_KEY
-  const venues = config.venues.enabled
+  const { venues } = settings
   if (venues.length === 0) {
     logger.warn('quoting.no_routes', {
       chainId: config.chainId,
@@ -137,7 +125,7 @@ async function main() {
       })
     ),
     chainId: config.chainId,
-    maxAgeMs: LISTED_MARKETS_MAX_AGE_MS,
+    maxAgeMs: settings.markets.maxAgeMs,
     logger
   })
   await tryCatch(listedMarkets.refresh())
@@ -192,27 +180,6 @@ async function main() {
     logger
   })
 
-  // The exec calldata for one liquidation — the same bytes the preparation simulates and the kernel
-  // validates, simulates again at its head, and signs.
-  const encodeExec = (
-    market: Market,
-    borrower: Address,
-    plan: LiquidationPlan,
-    swapPlan: SwapPlan | null
-  ): Hex =>
-    encodeLiquidationExec({
-      executor: config.executooorAddress,
-      midnight: config.midnight,
-      market,
-      collateralIndex: plan.collateralIndex,
-      seizedAssets: plan.seizedAssets,
-      repaidUnits: plan.repaidUnits,
-      borrower,
-      postMaturityMode: plan.postMaturityMode,
-      plan: swapPlan,
-      recipient: eoa
-    })
-
   // Borrower discovery: the markets liquidation-candidates endpoint, cursor-paginated and
   // over-inclusive. The lens re-reads every returned pair at the kernel's head, so this is a coverage
   // source, never the source of truth.
@@ -261,76 +228,41 @@ async function main() {
       logger: logger.layer,
       lens: 'midnight-liquidation'
     })
-  const kernel = liquidatorKernel({ config, account, logger })
+  const kernel = liquidatorKernel(settings, { config, account, logger })
   const journal = await createJournalFileSink({
     directory: join(config.kernel.stateDirectory, 'journal'),
-    graph: 'midnight-liquidation',
+    graph: LIQUIDATOR_GRAPH,
     build,
     capacityBytes: JOURNAL_CAPACITY_BYTES,
-    runCapBytes
+    runCapBytes,
+    runId: settings.runId,
+    settings
   })
   logger.info('journal.pruned', journal.pruned)
-  const running = await startLiquidator({
+  const running = await startLiquidator(settings, {
     journal: journal.journal,
     kernel: kernel.live,
     world: {
       discover,
       readLens,
-      caller: config.executooorAddress,
       onHead: head => void balanceMonitor.maybeLog(BigInt(head.number))
     },
-    worldValidMs: config.worldValidMs,
-    prepare: {
-      executor: config.executooorAddress,
-      minSurplusBps: config.quoting.minSurplusBps,
-      quoteFor,
-      encode: encodeExec,
-      simulate: data =>
-        simulateLiquidationExec(client, { executooor: config.executooorAddress, eoa, data }),
-      feesFor: liquidationFees(client, config, eoa),
-      nativeToken: config.wrappedNative,
-      validForMs: config.sendLifeMs,
-      now: Date.now
+    markets: { initial: listedMarkets.sources() },
+    refreshMarkets: async () => {
+      await listedMarkets.refresh()
+      if (venues.length === 0)
+        logger.warn('quoting.no_routes', { detail: 'still no venue API keys — bad-debt-only' })
+      return listedMarkets.sources()
     },
-    sizing: {
-      seizeCapMarginBps: config.quoting.seizeCapMarginBps,
-      headroomFloorBps: config.quoting.headroomFloorBps
+    refreshPrices: async () => {
+      await tokenPrices.refresh()
+      return { table: tokenPrices.table(), updatedAt: tokenPrices.snapshot().updatedAt }
     },
-    markets: {
-      initial: listedMarkets.sources(),
-      maxAgeMs: LISTED_MARKETS_MAX_AGE_MS,
-      refreshMs: config.markets.refreshMs,
-      refresh: async () => {
-        await listedMarkets.refresh()
-        if (venues.length === 0)
-          logger.warn('quoting.no_routes', { detail: 'still no venue API keys — bad-debt-only' })
-        return listedMarkets.sources()
-      }
-    },
-    prices: {
-      refreshMs: TOKEN_PRICES_REFRESH_MS,
-      validForMs: TOKEN_PRICES_VALID_MS,
-      refresh: async () => {
-        await tokenPrices.refresh()
-        return { table: tokenPrices.table(), updatedAt: tokenPrices.snapshot().updatedAt }
-      }
-    },
-    routes: {
-      resolvePair,
-      sweep: venueSelector.refresh,
-      curveOf: venueSelector.curveOf,
-      venues
-    },
-    venue: {
-      concurrency: PREPARE_CONCURRENCY,
-      budget: { calls: config.quoting.httpRps, perMs: 1_000 }
-    },
-    backoff: {
-      baseBlocks: Number(config.quoting.backoffBaseBlocks),
-      maxBlocks: Number(config.quoting.backoffMaxBlocks)
-    },
-    runId: runIdAt(Date.now()),
-    maxReservations: TRANSACTION_KERNEL_RESERVATIONS,
+    routes: { resolvePair, sweep: venueSelector.refresh, curveOf: venueSelector.curveOf },
+    quoteFor,
+    simulate: data =>
+      simulateLiquidationExec(client, { executooor: config.executooorAddress, eoa, data }),
+    readFees: chainFeeReads(client, config.chain),
     stats: createTickStats(),
     planSkipLog: createPlanSkipLog(),
     logger

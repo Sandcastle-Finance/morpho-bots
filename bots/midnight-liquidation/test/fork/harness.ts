@@ -111,6 +111,8 @@ async function waitForRpc(url: string, timeoutMs = 30_000): Promise<void> {
 //   8549 bots/quoter-bot            e2e/quoter-bot
 //   8551 packages/kit               kernel.anvil (local chain, no fork)
 //   8552 framework/kernel           host.anvil (local chain, no fork)
+//   8553 bots/quoter-bot            e2e/market-lens.fork
+//   8554 bots/roller                fork/rehearsal
 /**
  * Boots an anvil instance forking Base at FORK_BLOCK (chain id pinned to Base so signatures match).
  * `port` is explicit so parallel fork test files never collide — see the registry above.

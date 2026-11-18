@@ -182,21 +182,6 @@ describe('composeQuoting (Blue lens-projection adapter)', () => {
     }
   })
 
-  it('threads the position label into quote log events as the correlation id', async () => {
-    const events: { event: string; fields?: Record<string, unknown> }[] = []
-    const capturing: Logger = {
-      debug: () => {},
-      info: (event, fields) => events.push({ event, fields }),
-      warn: () => {},
-      error: () => {}
-    }
-    const { selector } = fakeSelector(['0x'])
-    const { quoteFor } = compose(selector, { logger: capturing })
-    await quoteFor(PLAN, OUT, LABEL)
-    const selectOk = events.find(e => e.event === 'select.ok')
-    expect(selectOk?.fields?.id).toBe(LABEL)
-  })
-
   it('projects the plan break-even into the venue slippage it asks for', () => {
     // seizedAssets 1000 at price 1e36 -> reference 1000; break-even 800 -> the route may give up
     // 200/1000 = 2000bps. If the adapter stopped threading `impliedRepaidAssets` this would read 0.

@@ -2,7 +2,7 @@ import type { Address } from 'viem'
 import type { Abi, Hex } from 'viem'
 
 import { getChainAddresses } from '@morpho-org/blue-sdk'
-import { createDeploylessClient, createLogger, withLogging } from '@repo/kit'
+import { createDeploylessClient } from '@repo/kit'
 import { advanceRateAtTarget } from '@repo/utils'
 import {
   decodeFunctionResult,
@@ -15,7 +15,7 @@ import {
 } from 'viem'
 import { call, getStorageAt } from 'viem/actions'
 import { base } from 'viem/chains'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { readVaultV1Lens, VaultV1ReallocationLens } from '../../src/state/lens.sol'
 import { VaultV1AccrualReferenceLens } from './reference-lens.sol'
@@ -154,44 +154,6 @@ function marketFeeSlot(id: Hex): Hex {
   )
   return toHex(base + 2n, { size: 32 })
 }
-
-describeFork('vault-v1 lens observability', () => {
-  it('emits one viem-dlc wide event per request, labelled with the lens', async () => {
-    const logger = createLogger('info', { env: {}, context: { bot: 'vault-v1-reallocation' } })
-    const client = createDeploylessClient({
-      chain: base,
-      rpcUrl: RPC_URL as string,
-      rpcUrlFallback: undefined
-    })
-    const { morpho, adaptiveCurveIrm } = getChainAddresses(base.id)
-
-    const lines: string[] = []
-    const spy = vi.spyOn(console, 'error').mockImplementation(line => lines.push(String(line)))
-    try {
-      await withLogging(
-        () =>
-          readVaultV1Lens(client, { morpho, adaptiveCurveIrm }, [{ vault: VAULT, eoa: EOA }], {
-            blockNumber: FORK_BLOCK
-          }),
-        { logger: logger.layer, lens: 'vault-v1-reallocation' }
-      )
-    } finally {
-      spy.mockRestore()
-    }
-
-    const concluded = lines.map(l => JSON.parse(l)).filter(e => e.event === 'concluded')
-    expect(concluded.length).toBeGreaterThan(0)
-    const event = concluded[0]
-    // `lens` is ours; `library` viem-dlc stamps itself and a caller cannot override it.
-    expect(event.lens).toBe('vault-v1-reallocation')
-    expect(event.library).toBe('viem-dlc')
-    expect(event.status).toBe('ok')
-    expect(typeof event.duration_ms).toBe('number')
-    expect(event.chain_id).toBe(base.id)
-    // The deployless facet's batching fields are what the dashboard's gas and batching charts read.
-    expect(Object.keys(event).some(k => k.startsWith('viem-dlc-deployless.'))).toBe(true)
-  })
-})
 
 describeFork('vault-v1 read-only accrual under a non-zero market fee', () => {
   it('dilutes totalSupplyShares exactly as Blue does', async () => {

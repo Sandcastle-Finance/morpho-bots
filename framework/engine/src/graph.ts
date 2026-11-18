@@ -59,7 +59,12 @@ export type Latest<T, S extends Shape = Shape> = Readonly<{
   node: Node<T, S>
   trigger: boolean
 }>
-export type Every<T> = Readonly<{ mode: 'every'; node: Stream<T> }>
+/**
+ * What of a write its reader acts on, by which a write is judged as pushed and as the journal holds
+ * it; throws {@link WriteRefusedError} for a write the reader cannot act on.
+ */
+export type WriteJudge = (node: string, write: unknown) => Data
+export type Every<T> = Readonly<{ mode: 'every'; node: Stream<T>; judge?: WriteJudge }>
 export type Watch<T> = Readonly<{ mode: 'watch'; node: Node<T> }>
 type Edge = Latest<unknown> | Every<unknown>
 type FoldEdge = Every<unknown> | Watch<unknown>
@@ -82,7 +87,11 @@ export const sample = <T, S extends Shape>(node: Node<T, S>): Latest<T, S> => ({
 })
 
 /** Each write since the reader last ran, in delivery order; several such inputs merge by it. */
-export const every = <T>(node: Stream<T>): Every<T> => ({ mode: 'every', node })
+export const every = <T>(node: Stream<T>, judge?: WriteJudge): Every<T> => ({
+  mode: 'every',
+  node,
+  ...(judge && { judge })
+})
 
 /**
  * A fold's view of a node's state rather than its writes: once per step in which the node was
@@ -128,6 +137,9 @@ export type Budget = Readonly<{ calls: number; perMs: number }>
  */
 export type Lane = Readonly<{ name: string; concurrency: number; queue: number; budget?: Budget }>
 
+/** The longest delay a timer honours; a longer one fires at once (https://nodejs.org/api/timers.html#settimeoutcallback-delay-args). */
+export const MAX_TIMEOUT_MS = 2 ** 31 - 1
+
 export const lane = (
   name: string,
   bounds: { concurrency: number; queue: number; budget?: Budget }
@@ -137,7 +149,15 @@ export const lane = (
     throw new GraphDefinitionError(`lane ${name} needs a positive concurrency`)
   if (!(Number.isSafeInteger(queue) && queue > 0))
     throw new GraphDefinitionError(`lane ${name} needs a positive queue bound`)
-  if (budget && !(Number.isSafeInteger(budget.calls) && budget.calls > 0 && budget.perMs > 0))
+  if (
+    budget &&
+    !(
+      Number.isSafeInteger(budget.calls) &&
+      budget.calls > 0 &&
+      budget.perMs > 0 &&
+      Number.isFinite(budget.perMs)
+    )
+  )
     throw new GraphDefinitionError(`lane ${name} needs a positive call budget`)
   return { name, ...bounds }
 }
@@ -168,7 +188,7 @@ export type Samples<S extends Sampled> = {
       : never
 }
 
-export type EffectContext<R, S extends Sampled = Record<never, never>> = Readonly<{
+export type EffectContext<R, S extends Sampled = {}> = Readonly<{
   /** Aborts on a cancel naming this request, and on stop; writes made after it are dropped. */
   signal: AbortSignal
   identity: string
@@ -189,7 +209,7 @@ export type EffectContext<R, S extends Sampled = Record<never, never>> = Readonl
  * policies (`identify`, `sequence`, `recovery`, `ready`) must not call the runner or a runner
  * context: one that does fails the graph with {@link PolicyReentryError}.
  */
-export type EffectSpec<Q extends Requests, R, S extends Sampled = Record<never, never>> = Readonly<{
+export type EffectSpec<Q extends Requests, R, S extends Sampled = {}> = Readonly<{
   requests: Q
   samples?: S
   results?: Stream<R>
@@ -228,6 +248,8 @@ export type NodeSpec = Readonly<{
   coalesces: boolean
   clock?: Readonly<{ everyMs: number; value: (now: number) => unknown }>
   expiries?: (value: unknown) => Iterable<number>
+  /** How a reader judges every push or result it takes, which the runner refuses unless it holds. */
+  judge?: WriteJudge
 }>
 
 export type OperatorSpec =
@@ -389,7 +411,7 @@ export type GraphBuilder = Readonly<{
    * produce it, and `build` refuses a reservation no fold produced.
    */
   reserve<T>(nodeId: string): Reserved<T>
-  effect<Q extends Requests, R = never, S extends Sampled = Record<never, never>>(
+  effect<Q extends Requests, R = never, S extends Sampled = {}>(
     effectId: string,
     spec: EffectSpec<Q, R, S>
   ): void
@@ -399,6 +421,8 @@ export type GraphBuilder = Readonly<{
    * holds at most one, which `build` checks.
    */
   scope<R>(prefix: string, body: (scope: GraphBuilder) => R, options?: ScopeOptions<R>): R
+  /** Whether `node` records no write equal to its last: a map's or a fold's output (§1.2). */
+  coalesces(node: Node<unknown>): boolean
 }>
 
 /**
@@ -462,6 +486,13 @@ export const createGraph = (id: string) => {
         throw new GraphDefinitionError(
           `${reader} reads every write of level ${edge.node.id}; read a level with latest, sample or watch`
         )
+      if (edge.mode === 'every' && edge.judge && spec.judge !== edge.judge) {
+        if (spec.judge)
+          throw new GraphDefinitionError(
+            `${reader} judges ${edge.node.id}'s writes as another reader does not`
+          )
+        nodes.set(spec.id, { ...spec, judge: edge.judge })
+      }
     }
   }
 
@@ -487,8 +518,10 @@ export const createGraph = (id: string) => {
       },
       clock: (local: string, clock: { everyMs: number; value: (now: number) => unknown }) => {
         const nodeId = member(local)
-        if (!(clock.everyMs > 0))
-          throw new GraphDefinitionError(`clock ${nodeId} needs a positive period`)
+        if (!(clock.everyMs > 0 && clock.everyMs <= MAX_TIMEOUT_MS))
+          throw new GraphDefinitionError(
+            `clock ${nodeId} needs a positive period a timer can hold, at most ${MAX_TIMEOUT_MS} ms`
+          )
         declare({ id: nodeId, kind: 'clock', coalesces: false, clock })
         claim(nodeId, 'clock')
         return handle({ id: nodeId } as Node<unknown>)
@@ -559,7 +592,7 @@ export const createGraph = (id: string) => {
           output: nodeId,
           emits,
           initial: spec.initial,
-          applyInput: spec.applyInput as unknown as FoldOperator['applyInput'],
+          applyInput: spec.applyInput,
           ...(spec.afterInputs && {
             afterInputs: spec.afterInputs as unknown as FoldOperator['afterInputs']
           })
@@ -610,6 +643,10 @@ export const createGraph = (id: string) => {
         if (options.recovery)
           recoveries.push({ members: own!, onFailure: options.recovery(result) })
         return result
+      },
+      coalesces: (node: Node<unknown>) => {
+        checkOwned('coalesces', node)
+        return nodes.get(node.id)!.coalesces
       }
     }
     return declared as unknown as GraphBuilder

@@ -168,6 +168,45 @@ describe('a bootstrap market decision', () => {
     expect(reached.detail).toMatchObject({ status: 'observed', action: 'queued' })
   })
 
+  test.each([
+    [true, { marketId, desiredOffer: offer, block: 50 }],
+    [false, undefined]
+  ])(
+    'refills a completed target a redemption emptied only with auto-refill %s',
+    (autoRefill, request) => {
+      const redeemed = reading({ position: position({ credit: 0n }), completed: true })
+      expect(
+        bootstrapPrepareRequest({ config: config({ autoRefill }), reading: redeemed, reference })
+      ).toStrictEqual(request)
+    }
+  )
+
+  test('lends a redeemed one-time target again after a restart, never past its credit target', () => {
+    const target = config().creditTarget
+    let credit = 0n
+    let lent = 0n
+    const fillUntilTarget = () => {
+      for (;;) {
+        const request = bootstrapPrepareRequest({
+          config: config(),
+          reading: reading({ position: position({ credit }) }),
+          reference
+        })
+        if (!request) return
+        credit += request.desiredOffer.assets
+        lent += request.desiredOffer.assets
+        expect(credit).toBeLessThanOrEqual(target)
+      }
+    }
+    fillUntilTarget()
+    for (const left of [0n, 600n, 0n]) {
+      credit = left
+      fillUntilTarget()
+    }
+    expect(credit).toBe(target)
+    expect(lent).toBeGreaterThan(target)
+  })
+
   test('stops refilling after the initial target without auto-refill', () => {
     const idle = decide({ reading: reading({ completed: true }) })
     expect(idle.act).toBeUndefined()

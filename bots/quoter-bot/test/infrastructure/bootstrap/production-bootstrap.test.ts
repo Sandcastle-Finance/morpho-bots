@@ -1,7 +1,6 @@
 import type { Address, Hex } from 'viem'
 
 import { TickLib, type IMarketParams } from '@morpho-org/midnight-sdk'
-import { MathLib } from '@morpho-org/morpho-ts'
 import { base } from 'viem/chains'
 import { describe, expect, test } from 'vitest'
 
@@ -66,7 +65,7 @@ const group = (overrides: Record<string, unknown> = {}) => ({
 describe('bootstrapGroupRateBps', () => {
   test('annualizes the resting tick of a group whose market still has a remaining term', () => {
     expect(bootstrapGroupRateBps({ tick: 100n, maturity: 2_000n, observedTimestamp: 1_000n })).toBe(
-      TickLib.tickToApr(100n, 1_000n) / (10n ** 18n / 10_000n)
+      3_153_599_684_640_000n
     )
   })
 
@@ -139,13 +138,8 @@ describe('bootstrap group projections', () => {
   })
 
   test('reserves an offer by the cash its units can spend at its tick, never zero', () => {
-    const tick = 5_000n
-    const price = TickLib.tickToPrice(tick)
-
-    expect(bootstrapLoanAssets(1_000_000n, tick)).toBe(
-      MathLib.mulDiv(1_000_000n, price, MathLib.WAD, 'Up')
-    )
-    expect(bootstrapLoanAssets(1n, tick)).toBe(1n)
+    expect(bootstrapLoanAssets(1_000_000n, 5_000n)).toBe(999_703n)
+    expect(bootstrapLoanAssets(1n, 5_000n)).toBe(1n)
     expect(bootstrapLoanAssets(1_000_000n, 0n)).toBe(1n)
   })
 

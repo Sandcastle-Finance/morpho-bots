@@ -79,7 +79,7 @@ const ledgerEntry = (start: bigint, state: Entry['state']) => {
     tick: 6_000n,
     maxUnits: 1_000n,
     continuousFeeCap: 0n
-  } as Parameters<typeof Offer.create>[0])
+  })
   const id = midnightCommitmentId(offer.group)
   const entry = {
     spec: { id },
@@ -181,21 +181,18 @@ const command = (
   const config = options.writer
     ? ConfigService.from({ ...environment, MAKER_PRIVATE_KEY: `0x${'11'.repeat(32)}` })
     : ConfigService.from(environment, { readOnly: true })
-  const reads = {
+  return createOfferInvalidation(config, {
+    ...(options.writer ? { writer: options.writer } : {}),
     client: {
       getChainId: async () => CHAIN,
       getCode: async () => '0x01' as Hex,
       getBalance: async () => options.balance ?? 100n,
       readContract: async () => true
-    },
+    } as never,
     groups: async () => {
       groupReads.count += 1
       return options.groups ?? []
     }
-  }
-  return createOfferInvalidation(config, {
-    ...(options.writer ? { writer: options.writer } : {}),
-    reads: reads as never
   })
 }
 

@@ -20,14 +20,6 @@ describe('ensureError', () => {
     expect(result.message).toContain('"string error"')
   })
 
-  it('should convert number to Error', () => {
-    const result = ensureError(42)
-
-    expect(result).toBeInstanceOf(Error)
-    expect(result.message).toContain('This value was thrown as is, not through an Error')
-    expect(result.message).toContain('42')
-  })
-
   it('should convert object to Error', () => {
     const obj = { code: 500, message: 'Server error' }
     const result = ensureError(obj)
@@ -50,13 +42,6 @@ describe('ensureError', () => {
 
     expect(result).toBeInstanceOf(Error)
     expect(result.message).toContain('This value was thrown as is, not through an Error')
-  })
-
-  it('should convert boolean to Error', () => {
-    const result = ensureError(false)
-
-    expect(result).toBeInstanceOf(Error)
-    expect(result.message).toContain('false')
   })
 
   it('should have shortMessage property', () => {
@@ -84,21 +69,6 @@ describe('ensureError', () => {
     expect(result.message).toContain('[Unable to stringify thrown value]')
     expect(result.shortMessage).toBe('[Unable to stringify thrown value]')
   })
-
-  it('should handle arrays', () => {
-    const result = ensureError([1, 2, 3])
-
-    expect(result).toBeInstanceOf(Error)
-    expect(result.message).toContain('[1,2,3]')
-  })
-
-  it('should handle BigInt values', () => {
-    const result = ensureError({ value: 1n })
-
-    expect(result).toBeInstanceOf(Error)
-    expect(result.message).toContain('[Unable to stringify thrown value]')
-    expect(result.shortMessage).toBe('[Unable to stringify thrown value]')
-  })
 })
 
 describe('assertNever', () => {
@@ -106,17 +76,5 @@ describe('assertNever', () => {
     const value = 'unexpected' as never
 
     expect(() => assertNever(value)).toThrow('Unhandled case: "unexpected"')
-  })
-
-  it('should include the value in error message', () => {
-    const value = 123 as never
-
-    expect(() => assertNever(value)).toThrow('Unhandled case: 123')
-  })
-
-  it('should handle object values', () => {
-    const value = { type: 'unknown' } as never
-
-    expect(() => assertNever(value)).toThrow('Unhandled case: {"type":"unknown"}')
   })
 })

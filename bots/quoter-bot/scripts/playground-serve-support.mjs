@@ -174,7 +174,7 @@ const unresolvedDependencies = packageRoot => {
 export const ensureFrozenDependencies = async ({
   repoRoot,
   packageRoot,
-  executable = 'pnpm',
+  executable = 'bun',
   env = process.env,
   chmodFile = chmod,
   platform = process.platform,

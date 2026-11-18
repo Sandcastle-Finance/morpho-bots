@@ -232,7 +232,15 @@ export type MonitoringEvent =
       event: 'transaction.settled'
       workflow: MonitoringWorkflow
       marketId?: Hex
-      operation: 'cancel' | 'ratify' | 'publish'
+      operation: 'cancel' | 'ratify' | 'publish' | 'redeem'
+      txHash: Hex
+    }
+  | {
+      /** A redemption withdrew `redeemedUnits` of the maker's credit at par, in `txHash`. */
+      event: 'position.redeemed'
+      workflow: MonitoringWorkflow
+      marketId: Hex
+      redeemedUnits: bigint
       txHash: Hex
     }
   | {
@@ -302,6 +310,14 @@ export type MonitoringEvent =
       to: Address
       nonce: number
     }
+  | {
+      /** The signer's native balance, about once a minute, so an alert can watch gas drain. */
+      event: 'signer.balance'
+      address: Address
+      balanceWei: bigint
+      balanceEth: number
+    }
+  | { event: 'signer.balance_failed'; address: Address; status: 'failed' }
   | { event: 'setup.check-failed'; check: string; status: 'failed' }
   | { event: 'setup.check-warning'; check: string; status: 'warning' }
 
@@ -335,6 +351,7 @@ const MONITORING_EVENT_NAMES = [
   'book.observed',
   'offer.consumed',
   'transaction.settled',
+  'position.redeemed',
   'transaction.lifecycle',
   'kernel.notice',
   'kernel.commitment',
@@ -345,6 +362,8 @@ const MONITORING_EVENT_NAMES = [
   'journal.pruned',
   'journal.capped',
   'signer.policy_violation',
+  'signer.balance',
+  'signer.balance_failed',
   'setup.check-failed',
   'setup.check-warning'
 ] as const satisfies readonly MonitoringEvent['event'][]
@@ -353,8 +372,8 @@ type MissingFromAllowlist = Exclude<
   MonitoringEvent['event'],
   (typeof MONITORING_EVENT_NAMES)[number]
 >
-const _allowlistIsExhaustive: MissingFromAllowlist extends never ? true : never = true
-void _allowlistIsExhaustive
+const allowlistIsExhaustive: MissingFromAllowlist extends never ? true : never = true
+void allowlistIsExhaustive
 
 const shippableEvents: ReadonlySet<string> = new Set([
   ...MONITORING_EVENT_NAMES,

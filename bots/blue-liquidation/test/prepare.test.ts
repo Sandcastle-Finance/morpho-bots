@@ -55,7 +55,7 @@ const deps = (overrides: Partial<PrepareDeps> = {}) => {
     stats,
     deps: {
       executor: EXECUTOR,
-      encode: () => '0xabcd' as Hex,
+      encode: () => '0xabcd',
       simulate: async () => ({ status: 'ok' }),
       stats,
       logger: silent,

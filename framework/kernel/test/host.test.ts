@@ -5,6 +5,7 @@ import {
   createRunner,
   GraphDefinitionError,
   GraphFailedError,
+  JournalIoTimeoutError,
   JournalOverflowError,
   keyedLevel,
   keyedMap,
@@ -90,7 +91,7 @@ class FakeChain implements KernelChain {
   code = '0x'
   accountCode = () => Promise.resolve(this.code)
   minedAt?: { hash: string; block: number; branch: string }
-  receipt = (hash: string) => {
+  receipt: KernelChain['receipt'] = (hash: string) => {
     this.onReceipt?.()
     const found = this.receipts.get(hash)
     if (!found || (found.block > this.forkAt && found.branch !== this.branch))
@@ -115,7 +116,7 @@ class FakeChain implements KernelChain {
       logs: []
     })
   }
-  commitment = () => Promise.reject(new Error('none'))
+  commitment: KernelChain['commitment'] = () => Promise.reject(new Error('none'))
   capacityReads: string[] = []
   capacity = (_resource: string, at: Block) => {
     this.capacityReads.push(at.hash)
@@ -189,7 +190,6 @@ const start = async (
   return {
     send: (event: RawRequest) => runner.push(unauthored(nodes.requests), event),
     state: () => structuredClone(runner.read(nodes.state)!),
-    hasJournal: runner.hasJournal,
     alarms: () => [...alarms],
     stopped,
     abandon: runner.abandon
@@ -200,12 +200,6 @@ const running = (driver: Awaited<ReturnType<typeof start>>) =>
   until(() => driver.state().lifecycle.kind === 'running', 'running')
 
 describe('the kernel hosted on the engine', () => {
-  it('gives test-only startKernel an in-memory journal by default', async () => {
-    const driver = await start()
-    expect(driver.hasJournal).toBe(true)
-    await driver.abandon()
-  })
-
   it('hands the signer the nonce, the kind, the spend ceilings, and the fee level of the candidate', async () => {
     const signed: Parameters<KernelEffects['signTx']>[1][] = []
     const driver = await start({
@@ -344,6 +338,30 @@ describe('the kernel hosted on the engine', () => {
     await driver.abandon()
   })
 
+  it("sends a tip's reads in bounded waves instead of one after another", async () => {
+    const chain = new FakeChain()
+    chain.height = 10
+    chain.finalized = 8
+    let inFlight = 0
+    let peak = 0
+    const capacity = chain.capacity
+    chain.capacity = async (resource, at) => {
+      peak = Math.max(peak, ++inFlight)
+      try {
+        await sleep(20)
+        return await capacity(resource, at)
+      } finally {
+        inFlight--
+      }
+    }
+    const resources = Array.from({ length: 40 }, (_, i) => `resource:${i}`)
+    const driver = await start({ chain, config: makeConfig({ observedResources: resources }) })
+    await running(driver)
+    await until(() => chain.capacityReads.length >= resources.length, 'every capacity read')
+    expect(peak).toBe(32)
+    await driver.abandon()
+  })
+
   it('reads nothing at a tip fetched before the finalized chain was found replaced', async () => {
     const chain = new FakeChain()
     chain.height = 10
@@ -369,6 +387,51 @@ describe('the kernel hosted on the engine', () => {
     await until(() => chain.capacityReads.includes('0x10B'), 'a read at the new tip')
     expect(chain.capacityReads).not.toContain('0x10A')
     expect(driver.alarms().some(a => a.startsWith('finality violated'))).toBe(true)
+    await driver.abandon()
+  })
+
+  it("lets a stopped poll's started reads settle before the next poll begins", async () => {
+    const chain = new FakeChain()
+    chain.height = 10
+    chain.finalized = 8
+    let signed = 0
+    const driver = await start({
+      chain,
+      effects: effects({
+        signTx: () => Promise.resolve({ hash: `0xtx${signed}`, raw: `raw:${signed++}`, bid: BID }),
+        broadcast: () => new Promise<never>(() => {})
+      })
+    })
+    await running(driver)
+    driver.send({ type: 'Submit', plan: liquidationPlan('first') })
+    driver.send({ type: 'Submit', plan: liquidationPlan('second') })
+    await until(() => Object.keys(driver.state().nonces).length === 2, 'two open records')
+    const held = Promise.withResolvers<void>()
+    const receipt = chain.receipt
+    chain.receipt = async hash => {
+      if (hash === '0xtx1') await held.promise
+      return receipt(hash)
+    }
+    let flipped = false
+    let pollsWhileHeld = 0
+    const latest = chain.latest
+    chain.latest = () => {
+      if (flipped) pollsWhileHeld++
+      return latest()
+    }
+    chain.receipts.set('0xtx0', { block: 5, branch: 'A' })
+    chain.beforeBlock = number => {
+      if (flipped || number !== 5) return Promise.resolve()
+      flipped = true
+      chain.forkAt = 1
+      chain.branch = 'B'
+      return Promise.resolve()
+    }
+    await until(() => flipped, 'the vouch that stops the poll')
+    await sleep(50)
+    expect(pollsWhileHeld).toBe(0)
+    held.resolve()
+    await until(() => pollsWhileHeld > 0, 'the next poll')
     await driver.abandon()
   })
 
@@ -1298,7 +1361,7 @@ describe('the kernel on the engine', () => {
     )
     holding = true
     await until(() => driver.state().lifecycle.kind === 'recovering', 'recovery')
-    expect(driver.alarms()).toContain('journal failed: JournalOverflowError')
+    expect(driver.alarms()).toContain('journal failed: overflow')
     driver.send({ type: 'Submit', plan: liquidationPlan('late') })
     await until(() => notices.includes('late refused'), 'the refusal')
     await until(() => sent.includes('raw:setConsumed'), 'the withdrawal')
@@ -1531,29 +1594,61 @@ describe('kernels in one process', () => {
     await runner.abandon()
   })
 
-  it('halts and stops cleanly when a bot operator fails in the step that starts it', async () => {
-    const g = createGraph('bot')
-    const kernel = declareKernel(g, options(new FakeChain()))
-    g.map('bot.view', {
-      reads: { state: latest(kernel.nodes.state) },
-      compute: ({ state }) => {
-        if (state.lifecycle.kind !== 'idle') throw new Error('the view failed')
-        return state.lifecycle.kind
-      }
-    })
-    const runner = createRunner(g.build(), {
-      now: () => 0,
-      journal: journal(async () => undefined)
-    })
-    await kernel.start(runner)
+  const SECRET = 'https://rpc.example/secret'
+  class rpc_example_secret extends Error {}
+  it.each([
+    [
+      'a class, name and message',
+      Object.assign(new rpc_example_secret(SECRET), { name: SECRET, code: SECRET })
+    ],
+    [
+      "a prototype's constructor and own fields",
+      Object.assign(
+        Object.create(
+          Object.assign(Object.create(Error.prototype), { constructor: { name: SECRET } })
+        ),
+        { name: SECRET, message: SECRET, code: SECRET, cause: new Error(SECRET) }
+      )
+    ],
+    [
+      'a revoked proxy whose prototype read throws',
+      (() => {
+        const { proxy, revoke } = Proxy.revocable(new Error(SECRET), {})
+        revoke()
+        return proxy
+      })()
+    ]
+  ])(
+    'halts and stops cleanly when a bot operator fails in the step that starts it, naming only the node, whatever %s carry',
+    async (_, thrown: unknown) => {
+      const g = createGraph('bot')
+      const alarms: string[] = []
+      const kernel = declareKernel(
+        g,
+        options(new FakeChain(), { onActivity: activity => alarms.push(...alarmsIn(activity)) })
+      )
+      g.map('bot.view', {
+        reads: { state: latest(kernel.nodes.state) },
+        compute: ({ state }) => {
+          if (state.lifecycle.kind !== 'idle') throw thrown
+          return state.lifecycle.kind
+        }
+      })
+      const runner = createRunner(g.build(), {
+        now: () => 0,
+        journal: journal(async () => undefined)
+      })
+      await kernel.start(runner)
 
-    const error = await runner.stopped.catch((value: unknown) => value)
-    expect(error).toBeInstanceOf(GraphFailedError)
-    expect(error).toMatchObject({
-      origin: 'bot.view',
-      stop: { type: 'report', outcome: 'clean', reason: 'bot.view failed: Error' }
-    })
-  })
+      const error = await runner.stopped.catch((value: unknown) => value)
+      expect(error).toBeInstanceOf(GraphFailedError)
+      expect(error).toMatchObject({
+        origin: 'bot.view',
+        stop: { type: 'report', outcome: 'clean', reason: 'bot.view failed' }
+      })
+      expect(alarms.join(' ')).not.toContain('rpc')
+    }
+  )
 
   it('refuses a second kernel in one graph, until a composite stop and startup exist', () => {
     const g = createGraph('bot')
@@ -1980,36 +2075,85 @@ describe('kernels in one process', () => {
     await runner.abandon()
   })
 
-  it('halts a kernel composed into a bot graph into recovery when the journal fails', async () => {
-    const g = createGraph('bot')
-    const alarms: string[] = []
-    const kernel = declareKernel(
-      g,
-      options(new FakeChain(), { onActivity: activity => alarms.push(...alarmsIn(activity)) })
-    )
-    let failing = false
-    const runner = createRunner(g.build(), {
-      now: () => 0,
-      journal: {
-        sink: {
-          append: () => (failing ? Promise.reject(new Error('disk')) : Promise.resolve()),
-          finalize: async () => undefined
-        },
-        capacityBytes: 1_000_000
-      }
-    })
-    const stopped = runner.stopped.catch((error: unknown) => error)
-    await kernel.start(runner)
-    const state = () => runner.read(kernel.nodes.state)!
-    await until(() => state().lifecycle.kind === 'running', 'running')
-    failing = true
-    runner.push(kernel.nodes.requests, { type: 'Affirm', ids: [] })
-    expect(await stopped).toMatchObject({
-      origin: 'journal',
-      stop: { type: 'report', outcome: 'clean', reason: 'journal failed: JournalFailedError' }
-    })
-    expect(alarms).toContain('journal failed: JournalFailedError')
+  const LEAK = 'https://rpc.example/secret'
+  const nested = (depth: number, leaf: Error): Error =>
+    depth === 0 ? leaf : new Error('link', { cause: nested(depth - 1, leaf) })
+  const throwingCode = Object.defineProperty(new Error('accessor'), 'code', {
+    get: () => {
+      throw new Error('code read')
+    }
   })
+  const lastLink = Object.defineProperty(new Error('3'), 'cause', {
+    get: () => {
+      throw new Error('read past the limit')
+    }
+  })
+  class rpc_example_journal_secret extends Error {}
+  it.each([
+    {
+      case: 'an errno code, its message left out',
+      failure: Object.assign(new Error(`write failed at ${LEAK}`), { code: 'EIO' }),
+      code: 'EIO'
+    },
+    {
+      case: 'a timed-out write',
+      failure: new JournalIoTimeoutError('append', 1),
+      code: 'io_timeout'
+    },
+    {
+      case: 'a credential in the class, name, message and code',
+      failure: Object.assign(new rpc_example_journal_secret(LEAK), { name: LEAK, code: LEAK }),
+      code: 'io'
+    },
+    {
+      case: 'an errno past the fourth link',
+      failure: nested(3, Object.assign(new Error('leaf'), { code: 'ENOSPC' })),
+      code: 'io'
+    },
+    {
+      case: 'a cause whose code throws',
+      failure: throwingCode,
+      code: 'io'
+    },
+    {
+      case: 'a throwing cause past the last link, never read',
+      failure: new Error('1', { cause: new Error('2', { cause: lastLink }) }),
+      code: 'io'
+    }
+  ])(
+    'halts a kernel composed into a bot graph into recovery when the journal fails: $case',
+    async ({ failure, code }) => {
+      const g = createGraph('bot')
+      const alarms: string[] = []
+      const kernel = declareKernel(
+        g,
+        options(new FakeChain(), { onActivity: activity => alarms.push(...alarmsIn(activity)) })
+      )
+      let failing = false
+      const runner = createRunner(g.build(), {
+        now: () => 0,
+        journal: {
+          sink: {
+            append: () => (failing ? Promise.reject(failure) : Promise.resolve()),
+            finalize: async () => undefined
+          },
+          capacityBytes: 1_000_000
+        }
+      })
+      const stopped = runner.stopped.catch((error: unknown) => error)
+      await kernel.start(runner)
+      const state = () => runner.read(kernel.nodes.state)!
+      await until(() => state().lifecycle.kind === 'running', 'running')
+      failing = true
+      runner.push(kernel.nodes.requests, { type: 'Affirm', ids: [] })
+      expect(await stopped).toMatchObject({
+        origin: 'journal',
+        stop: { type: 'report', outcome: 'clean', reason: `journal failed: ${code}` }
+      })
+      expect(alarms).toContain(`journal failed: ${code}`)
+      expect(alarms.join(' ')).not.toContain('rpc')
+    }
+  )
 
   it('lets one chain settle and stop cleanly while another chain in the process stalls', async () => {
     const settled: string[] = []

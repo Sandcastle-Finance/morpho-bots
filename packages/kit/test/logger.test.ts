@@ -183,8 +183,7 @@ describe('createLogger BetterStack path', () => {
   it('performs zero network activity when the env vars are unset', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockImplementation((() =>
-        Promise.reject(new Error('network must not be touched'))) as unknown as typeof fetch)
+      .mockImplementation(() => Promise.reject(new Error('network must not be touched')))
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const logger = createLogger('debug', { env: {} })
@@ -196,8 +195,7 @@ describe('createLogger BetterStack path', () => {
   it('warns and performs zero network activity under partial (token-only) config', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockImplementation((() =>
-        Promise.reject(new Error('network must not be touched'))) as unknown as typeof fetch)
+      .mockImplementation(() => Promise.reject(new Error('network must not be touched')))
     const err = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const logger = createLogger('debug', { env: { BETTERSTACK_SOURCE_TOKEN: 'tok' } })
@@ -213,8 +211,7 @@ describe('createLogger BetterStack path', () => {
     // Mock the HTTP layer so no real request can escape even if a batch were to flush.
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockImplementation((() =>
-        Promise.resolve(new Response(null, { status: 202 }))) as unknown as typeof fetch)
+      .mockImplementation(() => Promise.resolve(new Response(null, { status: 202 })))
     const err = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const logger = createLogger('debug', {
@@ -242,5 +239,25 @@ describe('createLogger BetterStack path', () => {
       attempts: ['1', '2']
     })
     fetchSpy.mockClear()
+  })
+
+  it('ships a line to BetterStack within a second of logging it', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(() => Promise.resolve(new Response(null, { status: 202 })))
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const logger = createLogger('info', {
+        env: { BETTERSTACK_SOURCE_TOKEN: 'tok', BETTERSTACK_INGESTING_HOST: 's1.example.com' }
+      })
+      logger.info('live.flow')
+      await vi.advanceTimersByTimeAsync(900)
+      expect(fetchSpy).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

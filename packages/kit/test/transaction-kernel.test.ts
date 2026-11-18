@@ -48,6 +48,14 @@ const LIMITS: TransactionKernelLimits = {
   stuckMs: 10_000,
   maxEvidenceAgeBlocks: 64
 }
+const SETTINGS = {
+  maxFeePerGasWei: LIMITS.maxFeePerGasWei,
+  maxSpendWei: LIMITS.maxSpendWei,
+  maxGasLimit: LIMITS.maxGasLimit,
+  finality: 'safe',
+  stateDirectory: '/nonexistent',
+  enrollment: 'enrolled'
+} as const
 /** One bump under the 10 wei per gas `maxSpendWei` funds a nonce fill. */
 const STEP_CAP = 9n
 const PADDED_GAS = (GAS * 120n) / 100n
@@ -99,16 +107,14 @@ function captureLogger() {
 const spec = (limits: TransactionKernelLimits = LIMITS) => {
   const { logger, events } = captureLogger()
   const kernel = transactionKernelSpec({
+    settings: { ...SETTINGS, ...limits },
     limits,
     validator,
     account,
     chain: base,
     client: createPublicClient({ chain: base, transport: http(RPC_URL, { retryCount: 0 }) }),
     rpcUrl: RPC_URL,
-    stateDirectory: '/nonexistent',
-    enrollment: 'enrolled',
     effectTimeoutMs: 1_000,
-    finality: 'safe',
     logger
   })
   return { ...kernel, events }
@@ -181,16 +187,14 @@ describe('transactionKernelSpec construction', () => {
     const { logger } = captureLogger()
     const reorgDepth = (chain: Chain) =>
       transactionKernelSpec({
-        limits: { ...LIMITS, chainId: chain.id },
+        settings: SETTINGS,
+        limits: LIMITS,
         validator,
         account,
         chain,
         client: createPublicClient({ chain, transport: http(RPC_URL) }),
         rpcUrl: RPC_URL,
-        stateDirectory: '/nonexistent',
-        enrollment: 'enrolled',
         effectTimeoutMs: 1_000,
-        finality: 'safe',
         logger
       }).live.reorgDepth
     const robinhood = defineChain({ ...base, id: 4663 })
@@ -201,16 +205,14 @@ describe('transactionKernelSpec construction', () => {
     const { logger } = captureLogger()
     const build = (depth: number) =>
       transactionKernelSpec({
+        settings: { ...SETTINGS, finality: { depth } },
         limits: LIMITS,
         validator,
         account,
         chain: base,
         client: createPublicClient({ chain: base, transport: http(RPC_URL) }),
         rpcUrl: RPC_URL,
-        stateDirectory: '/nonexistent',
-        enrollment: 'enrolled',
         effectTimeoutMs: 1_000,
-        finality: { depth },
         logger
       })
     expect(() => build(3_000)).toThrow(FinalityBeyondWindowError)
@@ -222,16 +224,14 @@ describe('transactionKernelSpec construction', () => {
     const { logger } = captureLogger()
     expect(() =>
       transactionKernelSpec({
+        settings: { ...SETTINGS, finality: 'latest' as never },
         limits: LIMITS,
         validator,
         account,
         chain: base,
         client: createPublicClient({ chain: base, transport: http(RPC_URL) }),
         rpcUrl: RPC_URL,
-        stateDirectory: '/nonexistent',
-        enrollment: 'enrolled',
         effectTimeoutMs: 1_000,
-        finality: 'latest' as never,
         logger
       })
     ).toThrow('finality must be safe, finalized, or a non-negative integer depth')
@@ -432,6 +432,7 @@ describe('transactionKernelSpec against a node that does not serve its finality 
     }
     const { logger } = captureLogger()
     const { live } = transactionKernelSpec({
+      settings: { ...SETTINGS, enrollment: 'enrolling' },
       limits: LIMITS,
       validator,
       account,
@@ -441,10 +442,7 @@ describe('transactionKernelSpec against a node that does not serve its finality 
         transport: custom({ request }, { retryCount: 0 })
       }),
       rpcUrl: RPC_URL,
-      stateDirectory: '/nonexistent',
-      enrollment: 'enrolling',
       effectTimeoutMs: 1_000,
-      finality: 'safe',
       logger
     })
     const { runner, nodes } = await startKernel({ ...live, store: new MemoryStore(), pollMs: 5 })

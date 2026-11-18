@@ -1,6 +1,6 @@
 import type { TxPayload } from '@repo/kernel'
 import type { SwapPlan } from '@repo/swaps'
-import type { Hex } from 'viem'
+import type { EncodeFunctionDataParameters, Hex } from 'viem'
 
 import { Executor, MorphoAbi } from '@repo/contracts'
 import { skimCall } from '@repo/swaps'
@@ -103,12 +103,14 @@ const liquidateWith = (
       abi: MorphoAbi,
       data: (outer.args as unknown[])[3] as Hex
     })
-    const args = edit([...(inner.args as unknown as unknown[])])
-    const callData = encodeFunctionData({
+    const innerArgs: readonly unknown[] = inner.args
+    const args = edit([...innerArgs])
+    const liquidateCall: EncodeFunctionDataParameters = {
       abi: MorphoAbi,
       functionName: 'liquidate',
       args
-    } as never)
+    }
+    const callData = encodeFunctionData(liquidateCall)
     return [ExecutorEncoder.buildCall(MORPHO, 0n, callData, context), ...rest]
   })
 

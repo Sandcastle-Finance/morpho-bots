@@ -9,11 +9,11 @@ levels and occurrences, and the kernel authorizes against declared evidence", an
   levels (`keyed.ts`), the journal entries (`journal.ts`) and their replay (`replay.ts`). Where the
   prose and the code disagree, the code is wrong or the prose is. Either way it is a bug in this
   spec.
-- [`test/`](./test) holds the scenario tests as vitest tests (§16).
-- Run them with `pnpm --filter @repo/engine run test` and `pnpm --filter @repo/engine run typecheck`.
+- [`test/`](./test) holds the scenario tests as vitest tests (§17).
+- Run them with `bun run --cwd framework/engine test` and `bun run --cwd framework/engine typecheck`.
 
 The engine builds and runs one static graph of data nodes, pure operators and effects. It knows no
-chains and no kernel: it has no runtime dependencies (§13). It never undoes a write, never infers
+chains and no kernel: it has no runtime dependencies (§14). It never undoes a write, never infers
 absence, and never rewinds. Authorizing an act is not its job; it carries evidence to the code that
 does.
 
@@ -26,16 +26,33 @@ fields sorted and `undefined` fields dropped, so `encode(a) === encode(b)` exact
 are the same data; `decode` reads it back, bigints included. A bigint is written as
 `{"$bigint": "<digits>"}`, so the field `$bigint` is reserved. Anything else is refused with
 `NotDataError`: `NaN` and the infinities, functions, `undefined` inside a list, and any object that
-is not a plain object, including `Map`, `Set`, `Date` and class instances (§15 for what `encode`
-cannot see). Traces: "encodes equal data identically whatever the field order", "drops undefined
-fields", "round-trips bigints", "tells a bigint from the same digits as a number or string", the
-"encode" block's "refuses" cases (a `Map`, a `Date`, `NaN`, a function, `undefined` in a list, the
-reserved field) and the "fold state" block's "refuses" cases (a `Set`, a class instance).
+is not a plain object, including `Map`, `Set`, `Date` and class instances (§16 for what `encode`
+cannot see). An object with an enumerable accessor field (a getter or a setter) is not data
+either, and a list is data only as an array of this realm that holds its items and nothing else,
+each an enumerable data property: no hole, no other field, no symbol-keyed field, no subclass.
+`encode` reads fields through their descriptors and runs none of the value's code, so a value
+reads the same however often and whenever it is encoded ("refuses %s as not data without running
+it", "refuses a derived value whose getter returns %s, keeping the one before", "refuses a list
+with %s as not data", "refuses a keys list whose iterator disagrees with its indices as not data").
+Traces: "encodes equal data identically whatever the field order", "drops undefined fields",
+"round-trips bigints", "tells a bigint from the same digits as a number or string", the "encode"
+block's "refuses" cases (a `Map`, a `Date`, `NaN`, a function, `undefined` in a list, the reserved
+field) and the "fold state" block's "refuses" cases (a `Set`, a class instance).
 
-Every value a node carries is checked against `encode` as it is accepted: a push that is not
-data throws before it is queued (but a level write whose `value` is `undefined`, §15); a fold
-state, map output or emit that is not data fails the step (§5) and so the graph, leaving the state
-the operator had (the "fold state" block's "refuses" cases); an
+What a push, a clock or an effect writes is held as its round trip, `decode(encode(value))`, the
+form the journal stores and replay reads back: key order, `undefined` fields and the sign of zero
+are not part of a value, so live evaluation iterates as replay does ("holds a push and an effect's
+result as the journal reads them back, so a map over field order replays", "replays a keyed delta
+whose new key sorts before the old ones to a map over key order"). Each step's stamp reaches its
+readers frozen, with its fields in the order the journal reads them back, live and in replay
+("stamps each step with a frozen stamp whose fields are in the order the journal reads back").
+Operators derive every other value from these, the same live as in replay, so a derived value is
+held as its operator wrote it, and a reader may know it again by reference ("holds what an operator
+writes as the operator wrote it, so it can know the value again by reference").
+
+Every value a node carries is checked against `encode` as it is accepted: a push that is not data
+throws before it is queued; a fold state, map output or emit that is not data fails the step (§5)
+and so the graph, leaving the state the operator had (the "fold state" block's "refuses" cases); an
 effect result that is not data throws into the handler that wrote it; a clock value that is not
 data fails the graph at the clock; and a note that is not data throws into the handler that made it
 ("refuses a note that is not data at note time").
@@ -71,11 +88,14 @@ and coalesces after").
 `unknown` or `failed`, with `value` and `digest` when it holds a value, and `basis`, `expiry` and
 `reason` as the last write carried them. `runner.read(node)` is its value when it holds one, else
 `undefined`. A level write is `{ value, basis, expiry? }` or `{ status: 'unknown' | 'failed',
-reason? }`: a present write without its basis is refused, and a failed read carries no value, so a
-reader downstream sees `failed`, never an empty value ("refuses a level write without its basis,
-and refreshes evidence on an equal write", "carries a failed read to its readers as failed, never
-as a value"). An equal value with a new basis is recorded and visible, since a level does not
-coalesce.
+reason? }`: a present write is refused without its value or its basis, and a `value` of `undefined`
+is none (§1.1); a failed read carries no value, so a reader downstream sees `failed`, never an empty
+value ("refuses a level write without its value or its basis, and refreshes evidence on an equal
+write", "carries a failed read to its readers as failed, never as a value"). A write whose status,
+expiry or reason the journal would not carry, such as one that is not an enumerable field, is
+refused rather than held without it ("refuses a level write whose status, expiry or reason does not
+survive the journal, and changes nothing"). An equal value with a new basis is recorded and visible,
+since a level does not coalesce.
 
 ### 1.4 Shapes in the types
 
@@ -105,7 +125,7 @@ its `initial` whatever it reads.
 ## 2. Declaring a graph
 
 `createGraph(id)` returns a builder; `build()` checks the declaration and fixes the evaluation
-order. The builder must be treated as consumed afterwards; nothing enforces it (§15). A `Graph`'s layout is keyed by a symbol the package does not export: it is not API, and
+order. The builder must be treated as consumed afterwards; nothing enforces it (§16). A `Graph`'s layout is keyed by a symbol the package does not export: it is not API, and
 `layoutOf` from `@repo/engine/testing` exists only so tests can pin it (review).
 
 - **One producer per node.** A level or occurrence is written by pushes; a clock by the runner; a
@@ -124,9 +144,10 @@ order. The builder must be treated as consumed afterwards; nothing enforces it (
   of a map output, which coalesces equal writes", "refuses an every read of a fold output, which
   coalesces equal writes", "refuses an every read of a level, whose failed writes carry no value");
   one on an occurrence source, a clock or an emitted node builds ("reads every write of an
-  occurrence source, a clock and an emitted node").
+  occurrence source, a clock and an emitted node"). `g.coalesces(node)` says which a node is, for a
+  handle this graph created ("says which nodes coalesce").
 - **Ids.** A node id is declared once. An effect id is distinct from every other effect's and from
-  every operator declared before it; an operator declared after an effect may reuse its id (§15).
+  every operator declared before it; an operator declared after an effect may reuse its id (§16).
   An effect and an operator never collide at run time whatever ids they were declared with, since
   they read through disjoint keys ("refuses two effects with one id", "keeps an effect and an
   operator apart whatever ids they are declared with").
@@ -144,11 +165,13 @@ order. The builder must be treated as consumed afterwards; nothing enforces it (
   including one whose fold was refused for another reason. A fold of a reservation is typed by the
   reservation alone, and belongs to the recovery scope it is declared in, not the one it was
   reserved in ("a reserved fold output" block).
-- **Bounds.** A clock needs a period above zero; nothing more of it is checked. A `lane` needs a
-  positive concurrency (a safe integer or `Infinity`), a positive safe-integer queue bound, and, when
-  budgeted, a positive safe-integer `calls` and a positive `perMs` ("refuses a budget that could
-  never start anything" for zero calls, "refuses bounds that could never start or hold anything" for
-  zero or `NaN` concurrency and a zero queue). An effect with
+- **Bounds.** A clock needs a period above zero that a timer can hold, at most `2^31 - 1` ms, since
+  a longer one fires at once ("refuses a clock period of %s ms, which a timer cannot hold"). A
+  `lane` needs a positive concurrency (a safe integer or `Infinity`), a positive safe-integer queue
+  bound, and, when budgeted, a positive safe-integer `calls` and a positive, finite `perMs`
+  ("refuses a budget that could never start anything" for zero calls, "refuses a budget whose window
+  never ends", "refuses bounds that could never start or hold anything" for zero or `NaN`
+  concurrency and a zero queue). An effect with
   `finishOnStop` may not declare `ready` ("refuses to wait to be ready, which nothing could change
   after a stop").
 - **Evaluation order.** Operators are ordered topologically over every edge they read whose node an
@@ -239,6 +262,39 @@ order until none is scheduled (untested).
 - While the runner's journal is open, every step that lands is journaled (§9) ("replays a journal's
   stamped steps without running an effect, and finds a step that differs").
 
+### 5.1 The step observer
+
+`createRunner(graph, { observe })` calls `observe(step)` once before the first step, with `seq` 0,
+the first step's `at` and every node, then once per committed step, after its propagation and
+before it is journaled or its effects are routed. `step` is frozen: a copy of the stamp, a frozen
+`{ node, record }` for each node the step recorded, once each, the wakes, and `degraded`, true once
+only the recovery scope runs (§11). Each `record` is the node's record as the step left it, so a
+node written twice in one step is seen once, settled ("sees every node before the first step, then
+each committed step once, as the step left it"). Records are immutable, so one kept past its step
+still describes that step. A step that was rolled back is not observed; its
+recovery re-run is, under its own stamp ("never sees a step that was rolled back, and sees its
+re-run as degraded").
+
+An observer is not work, and the engine's rule for it is the reverse of its rule for work (§15): an
+observer can never stop the graph (review).
+
+- **It cannot act on the run.** While it runs, `push`, `pushAll`, `start`, `abandon` and every
+  call on a runner context (`note`, `write`, `stop`, `now` and each sample) throw
+  `ObserverReentryError` into it and do nothing ("refuses, into the observer, a call that would act
+  on the run, and never calls it again" cases). `runner.read` and `runner.record` are not refused.
+- **A failure drops it.** When it throws, returns a promise or another thenable, or makes a refused
+  call, even one it caught, the runner never calls it again in that run and `runner.observerFailed`
+  reads true. Nothing is journaled and nothing else is told: there is no error callback, so nothing
+  of the observer's can throw into the runner a second time. A returned promise, from any realm,
+  gets handlers for both outcomes, and another thenable's `then` is never called, so neither
+  surfaces as an unhandled rejection (§16) ("drops an observer on" cases, "drops an
+  observer that throws in the recovery re-run, and the recovery still winds down", "drops an
+  observer whose returned value calls the runner from its then, though it caught the refusal").
+- **A run is the same with or without one, under the same `now`**: every journal entry and the
+  outcome ("leaves every journal entry and the outcome as they are without one" cases, a slow
+  observer among them). It runs synchronously inside the step, which waits for it, so a slow
+  observer delays every later step, and what reads the time sees those steps later (§16).
+
 ## 6. Expiries and wakes
 
 A node's **expiries** are, for a level, its write's own `expiry`; for a map or fold, each number
@@ -276,7 +332,7 @@ The runner **wakes** a node's watchers when an expiry it carries passes, once st
 An effect is the operator meant for side effects; the purity of map, fold, expiry and projection
 callbacks is not enforced. `g.effect(id, spec)` declares one over `requests`, a record of
 `every` edges; each write to one of them is a **request**. A request is refused while another under its identity is
-waiting or running (§7.1); a completed identity is not remembered (§15) ("stops rather than run a
+waiting or running (§7.1); a completed identity is not remembered (§16) ("stops rather than run a
 request whose identity is still waiting or running").
 
 ### 7.1 Routing and admission
@@ -288,7 +344,7 @@ request came in on, in delivery order"). Each is **admitted** in that order:
 
 1. `sequence(request)`, when it returns a position, must exceed the highest position the effect
    admitted so far; otherwise the request is refused ("stops rather than run a completed request
-   redelivered below its sequence"). The position is not validated (§15).
+   redelivered below its sequence"). The position is not validated (§16).
 2. `identify(request)`, or the delivery's write sequence by default, is its identity. One still
    running under the same identity refuses it ("stops rather than run a request whose identity is
    still waiting or running"), and so does one still waiting. Completed identities are not
@@ -366,7 +422,8 @@ from. One that calls the runner (`push`, `pushAll`, `start`, `abandon`) or any r
 effect even when the policy caught it, and even when the policy then threw something else ("fails
 the graph from the effect, though the policy caught it", "keeps the refusal as the failure when the
 policy throws after catching it", "never starts the effect outside a recovery scope it degraded").
-`runner.read` and `runner.record` are not refused.
+`runner.read` and `runner.record` are not refused. The step observer is refused the same calls
+(§5.1).
 
 ### 7.5 Effects that finish on stop
 
@@ -374,7 +431,7 @@ An effect with `finishOnStop`, for a reporter with no side effect on funds, keep
 requests on a clean stop: they run, with an aborted signal, within the lane's concurrency, and the
 stop settles only after them. A halt or an abandon drops them, while a degrade keeps those in the
 recovery scope. One started after the stop failing drops the rest and rejects the stop with its
-error (§15 for one already running) ("runs its queued requests after a clean stop, before the
+error (§16 for one already running) ("runs its queued requests after a clean stop, before the
 stop settles, and drops the rest", "drops its queued requests when a failure stops the runner",
 "drops its queued requests when the runner is abandoned", "drops the rest and rejects the stop
 with the error when one of them fails").
@@ -388,7 +445,9 @@ expiry, `absent` with the basis and expiry of the read that found it gone, or `u
 with a reason. `keyRecord(keyed, key)` is the key's own record, else absent under the last complete
 write, else unknown; it reads only own fields, so a key such as `constructor` is never a false hit
 ("reads a newly written key at once, and a key no complete write carried as absent"). `UNREAD` is
-the value before any write.
+the value before any write. `isKeyed(value)` checks only the outline, a coverage status and a
+record of keys, and nothing inside them ("tells a keyed value by its coverage status and record of
+keys").
 
 `keyedLevel(g, id, writes)` folds `KeyedWrite`s from an occurrence stream, in delivery order:
 
@@ -399,6 +458,23 @@ the value before any write.
 | `carried` with `entries`, `absent?`, `failed?`, `basis` | changes only the keys it names: entries present under its basis and expiry, `absent` ones absent under them, `failed` ones failed; within one write an entry wins over `absent`, which wins over `failed`; coverage and the vouched absence are unchanged |
 | `unknown` or `failed` with `keys`                       | sets those keys to that status, with the reason; coverage and every other key unchanged                                                                                                                                                                   |
 | `unknown` or `failed` without `keys`                    | sets `coverage` to that status, with the reason; no key changes, so nothing becomes absent                                                                                                                                                                |
+
+A keyed level judges every write to the node it reads, pushed, produced or emitted, against the
+`KeyedWrite` type, as pushed and as the journal holds it, and refuses it unless both meet the type
+and agree: `entries` and `basis` on a `complete` or `carried` write, with a value for every entry;
+`keys`, `absent` and `failed` lists of strings with no hole; a safe-integer `expiry`; a text
+`reason`. Otherwise the journal would drop a field the level acts on, and replay would read the
+write another way: a dropped entry of a complete write reads as absent ("refuses a write naming a
+key with no value, so a complete write never reads it as absent", "refuses a keyed write the level
+would misread or the journal would not carry", "refuses an effect result the level would misread,
+into the handler that wrote it", "fails the step when a fold emits a keyed write the level would
+misread"). A refused push changes nothing; a fold's emit is derived again in replay, so it is judged
+once, as emitted. This holds for the keyed level's node alone: plain data whose field is named
+`entries` drops an `undefined` field as any data does (§1.1) ("holds plain data that names a field
+entries as any other, dropping an undefined field"). The level records its judge on that node
+through its `every` read, `every(writes, judge)`; two readers that judge one node differently are
+refused when the graph is declared ("refuses a second reader that judges the level's writes another
+way").
 
 Traces: "reads a newly written key at once, and a key no complete write carried as absent", "leaves
 every key as it was when the scope read fails, so nothing becomes absent", "changes only the keys a
@@ -507,7 +583,10 @@ has degraded, so describing cannot change the stop").
   sink's error as its cause ("fails the graph on a failed append, keeping the sink error as its
   cause", "treats a sink that throws instead of rejecting as a failed append").
 - **I/O deadline.** Each append and finalization has a finite deadline, defaulting to
-  `DEFAULT_JOURNAL_IO_TIMEOUT_MS` and overridable with `ioTimeoutMs`. Expiry fails the journal with
+  `DEFAULT_JOURNAL_IO_TIMEOUT_MS` and overridable with `ioTimeoutMs`. The deadline counts only time
+  the event loop was free: it accrues in at least ten bounded ticks, so a loop blocked by a long
+  synchronous step spends one tick and an operation that completed meanwhile still settles ("lets an
+  append that completed while the loop was blocked beat a %i ms deadline"). Expiry fails the journal with
   `JournalFailedError` caused by `JournalIoTimeoutError`; graph steps and recovery never await the
   journal. A timed-out append aborts its signal, discards the remaining queue, and prevents a later
   journal operation from overlapping it ("reaches a terminal clean-stop outcome when an append
@@ -548,7 +627,8 @@ pre-existing directories are unchanged, its file is mode `0600`, and its header 
 container format, engine journal format, graph id, run id,
 start time and a runtime-validated build identity containing only a short `revision` and `imageTag`;
 URL-shaped values, credential-shaped values and extra fields are refused before file creation
-(review). Directory creation and permissions, exclusive file open, header write and `fdatasync`,
+(review). A bot may also record its settings, the plain data it built its graph from, so a replay
+can build the same graph (review). Directory creation and permissions, exclusive file open, header write and `fdatasync`,
 and directory sync share the runner's finite journal I/O deadline. Expiry rejects startup with
 `JournalIoTimeoutError` and starts closing each handle already acquired, without waiting for the close
 to finish (review). Each canonical JSONL entry
@@ -556,27 +636,52 @@ is acknowledged only after `fdatasync`; clean finalization writes an end record,
 closes it, then syncs the containing directory. Finalization after any runner journal failure closes
 the file and syncs the directory without writing a clean end record (review).
 
-The file reader decodes and validates its header, frames and ordering one line at a time. It returns
-a truncated final frame as a reported crash tail, but reports a malformed newline-terminated frame
-or a semantically invalid delta chain as corruption. A bad UTF-8 line retains the validated header
-and entry prefix (review). Startup leaves old run files untouched; the reader validates an old run
+The file reader streams the file, decoding and validating its header, frames and ordering one line
+at a time. It yields the header, then each entry with its line number, then the file's outcome, and
+holds only the line being read and each keyed node's last complete write, never the whole file. It
+reports a truncated final frame as a crash tail, but a malformed newline-terminated frame or a
+semantically invalid delta chain as corruption, after the valid prefix (review). Startup leaves old run files untouched; the reader validates an old run
 only when a person or agent asks to read it (review).
 Invalid capacity is refused before a file is created (review). The opener returns a deadline-bound
 `finalize` for the startup caller to close a sink when runner construction throws (review).
 
 ## 10. Replay
 
-`replay(graph, entries)`, from `@repo/engine/replay` and for tests and tools only, reconstructs keyed
-deltas from earlier complete writes in the same run, then re-runs each `step` entry's writes and
-wakes, under the recorded stamp, on a fresh copy of the graph, and
-compares the derived writes it produces, node by node and digest by digest, with the entry's. It
-runs no effect: effect results are among the journaled writes, and every request an effect would
-have taken is discarded. Notes and `failed` entries are skipped. A `recovery` entry switches it to
-evaluating only the recovery scope's members, as the run did. It reports `{ ok: true, steps }`,
-counting steps only, or the first step that differs: `{ ok: false, step, reason }`, with `reason`
-`derived writes differ` or `the step threw: <message>` ("replays a journal's stamped steps without
-running an effect, and finds a step that differs", "journals the recovery, so its steps replay as
-they ran", "journals the wake as a step of its own, which replay reproduces").
+`createReplayer(graph)`, from `@repo/engine/replay` and for tests and tools only, replays a journal
+on a fresh copy of the graph, one entry per `apply(entry)` call. For a `step` entry it reconstructs
+keyed deltas from earlier complete writes in the same run, re-runs the entry's writes and wakes
+under the recorded stamp, and compares the derived writes it produces, node by node and digest by
+digest, with the entry's. It runs no effect: effect results are among the journaled writes, and
+every request an effect would have taken is discarded ("returns each step's writes in order").
+
+- **A step that matches** returns `{ kind: 'step', stamp, wakes, writes }`. `writes` holds every
+  write the step recorded, pushed or derived, in order: its node, its record, whether an operator
+  derived it, and its producer (the operator, the effect whose result it is, or the clock; none for
+  a source). A node written several times in a step appears once per write, a blocked write as its
+  status, and a coalesced write not at all ("returns each step's writes in order, with values and
+  producers, for several emissions to one node", "returns a blocked write as its status, and no
+  write where a node coalesced", "returns an expiry wake as a step of its own").
+- **`note`, `failed` and `recovery` entries** come back as journaled. A failed effect or rolled-back
+  step is reported, never reproduced. A `recovery` entry switches the replayer to evaluating only
+  the recovery scope's members, as the run did ("returns failed and recovery entries as journaled,
+  and replays the re-run step under the recovery", "returns a failed effect as journaled, without
+  running it").
+- **The first step that differs** returns a `diverged` result, and every later call returns it
+  again. It carries the step's `stamp`, a `reason` (`derived writes differ`,
+  `the step threw: <message>` or `a keyed delta has no earlier complete write`), and the `node`:
+  the first derived write whose node or digest differs, the journal's when it has one, with the
+  `expected` and `actual` digests; the operator the step threw in, or none when a write was
+  refused before any operator ran; or the delta's node. Its `writes` are unverified: the whole
+  step's on a digest mismatch, and those recorded before the throw when the step threw ("names the
+  first derived write that differs, and stops there", "names the operator a replayed step throws
+  in", "names no node when a replayed write is refused before any operator runs", "names the node
+  of a keyed delta with no earlier complete write"). The journal's per-node digests are what let it name the node, so `derived`
+  keeps one per write.
+
+`replay(graph, entries)` applies every entry and reports `{ ok: true, steps }`, counting steps only,
+or the first step that differs: `{ ok: false, step, reason }` ("replays a journal's stamped steps
+without running an effect, and finds a step that differs", "journals the recovery, so its steps
+replay as they ran", "journals the wake as a step of its own, which replay reproduces").
 
 Replay compares derived writes, not effects, notes or the values of external writes, and it is only
 as faithful as the graph it is given: the same declaration, with the same operators, must be
@@ -591,7 +696,7 @@ A **failure** is a step that throws (any operator, a refused derived write, a cy
 bound), an effect's handler that throws or rejects, a refused request (§7.1), a lane policy that
 re-enters the runner (§7.4), a clock whose `value` throws or is not data ("stops the graph with its
 failure"), or a closed journal (§9.2). Its **origin** is the operator, effect, clock or `journal` it
-happened at.
+happened at. A step observer's throw is not a failure (§5.1).
 
 - **Without a recovery scope**, or when the origin is inside the one there is, or, once the graph
   is degraded, when the origin is a member or unnamed, the runner **halts**: it journals the
@@ -619,7 +724,7 @@ happened at.
   ("resolves its stop with the value an effect stops it with, after work that must land", "settles
   the stop only after the work that stopped it, though that work goes on after"). After a degrade it
   rejects with `GraphFailedError` instead; after a finishing effect started by the stop failed,
-  with that error (§15).
+  with that error (§16).
 - **`runner.abandon()`** aborts every effect, clears every clock and timer ("writes its node on its
   period once started, and never after the runner stops"), drops every waiting request, and
   resolves once each running effect has settled and the journal has finalized; nothing propagates
@@ -648,7 +753,55 @@ node read along two paths through the first of its reads already reached", "star
 its every requests, and from its samples only when it waits on ready", "carries nothing through the
 recovery scope when asked to skip it").
 
-## 13. Package boundary
+## 13. Describing a graph
+
+`describeGraph(graph)` returns a built graph's shape as plain data, tagged with
+`GRAPH_DESCRIPTION_FORMAT`, which changes whenever the description's own shape does:
+
+- **Nodes**, by id: each one's kind, its shape (§1.4), whether it coalesces, whether its producer
+  declared `expiries`, and its producer: a source, a clock with its period, a map or fold, the fold
+  that emits it, or the effect whose results it is ("names each node by id with its kind, shape
+  and producer").
+- **Operators**, in evaluation order: each read by alias, with the edge it was declared with
+  (`latest`, `sample`, `every` or `watch`, §3), and each fold's emits and whether it declares
+  `afterInputs` ("lists operators in evaluation order, each read by alias with the edge it was
+  declared with").
+- **Effects**, in dispatch order: requests and samples by alias, results, lane, and its policies:
+  each of the callbacks `identify`, `sequence`, `recovery` and `ready` the spec defines, and
+  `latestOnly` and `finishOnStop` when set. **Lanes** are listed in the order the runner serves
+  them (§7.2), each with its concurrency (`unbounded` when it has no bound), queue and budget
+  ("lists effects in dispatch order with their lane and the policies they declare"). A lane whose
+  name an earlier lane already took is named by the first free `#2`, `#3` suffix ("names a lane
+  whose name another lane already took by the first free suffix").
+- **Recovery**: the recovery scope's members by id, absent when the graph has none ("names the
+  recovery scope by member id, and is versioned").
+
+Ids are the namespaced ids the scopes gave them (§2). Reads, samples, emits and members are sorted,
+so reordering a declaration that changes nothing the runner does changes nothing here ("is the
+same data whatever order a spec declared its reads in"). Reads and samples sort by node, then one
+node's `every` reads before its others, each in declaration order, since a fold takes their tied
+deliveries in that order (§4.2; "keeps the declaration order of one node's aliases, which orders
+their deliveries", "lists a node's every read before its watch read, as a fold takes them").
+
+`graphMarkdown(description, context?)`, from `@repo/engine/testing`, renders a description as a
+Markdown listing with no diagram ("lists a description as Markdown, with no diagram"). It starts
+with source and clock entry points, including clock periods. Each node lists its direct consumers:
+operator reads by mode, effect requests, and effect samples, once per reader and mode or role.
+Aliases remain in the ordered operator and effect listings ("indexes direct consumers by mode and role while preserving every alias in the ordered listings"). These are declared edges, not transitive paths or claims about callback decisions. A node
+with no declared consumer may still be used outside those declarations. Operators remain in
+evaluation order and effects in dispatch order. Effects omit absent results and policies; no
+result stream does not mean no external side effect. The listing explains read modes, shapes,
+expiry extractors and recovery, and has no scope-count table.
+
+The optional context supplies `declaration`, `fixture` and `spec` links, relative to the listing's
+location, and adds fixture provenance and the regeneration command ("adds fixture provenance only when the caller supplies its links"). Each framework bot's
+`test/graph-listing.test.ts` supplies these links, builds its graph from settings shaped like
+production with placeholder dependencies, and compares the listing with its checked-in `GRAPH.md`,
+failing when the file is stale. The listing describes that fixture, not a deployed configuration.
+`bunx vitest run graph-listing -u` at the repository root rewrites every bot's. `graph.ts` is the
+one hand-written description of a bot's graph, and `GRAPH.md` the one generated view.
+
+## 14. Package boundary
 
 `@repo/engine` has no runtime or peer dependencies and imports nothing but its own modules and Node
 built-ins, so it cannot know about chains or the kernel ("has no runtime dependencies, so it cannot
@@ -656,7 +809,7 @@ know about chains or the kernel", "imports nothing but its own modules and node 
 reads `from` imports). Its
 exports are the package root, `@repo/engine/replay` and `@repo/engine/testing`.
 
-## 14. What is deliberately left out
+## 15. What is deliberately left out
 
 - **A bound on a blocked map's `every` buffers** (§3). They grow until the map runs.
 - **A second recovery scope.** One scope, one wind-down, one stop; a composite stop does not exist.
@@ -664,9 +817,10 @@ exports are the package root, `@repo/engine/replay` and `@repo/engine/testing`.
   checkpointing and retention are not. A process start creates a new run; operators rotate by
   restarting and retain or delete whole finalized runs (review).
 - **Memoized evaluation and graphs whose shape depends on data**, as the dataflow ADR left them.
-- **Dropped work.** No lane, queue or journal drops work silently: each refuses and stops.
+- **Dropped work.** No lane, queue or journal drops work silently: each refuses and stops. The step
+  observer is not work, and is the one thing the engine drops (§5.1).
 
-## 15. Residual risks
+## 16. Residual risks
 
 - **A journal failure leaves no marker.** Nothing is journaled after the journal closes, so a
   journal that ends mid-run reads the same whether the sink failed or the process died.
@@ -675,40 +829,50 @@ exports are the package root, `@repo/engine/replay` and `@repo/engine/testing`.
 - **The re-run step is re-stamped.** A rolled-back step is re-run under a new `seq` and `at`, with
   its `wakes` recomputed at that time rather than copied, so its journaled re-run is not
   byte-identical to the failed step.
-- **Buffers are unbounded** (§3, §14), so a map blocked for long holds memory for every delivery.
+- **Buffers are unbounded** (§3, §15), so a map blocked for long holds memory for every delivery.
 - **`ready` is re-evaluated for waiting requests whenever their lane has a free slot**, so a lane
   with many waiting requests and a costly `ready` can pay that on every step.
 - **A `write` from an effect with no `results` node** is a declaration error found only when the
   handler first writes, as a `GraphDefinitionError` thrown into the handler.
 - **The runner's `now()` is not checked.** A `now` option that returns a non-finite number stamps
   steps with a value `encode` would refuse; a clock's non-finite value, by contrast, fails the
-  graph.
+  graph. One that returns `-0` stamps steps whose journal reads back `0`.
 - **An effect's identities are forgotten once handled.** Only a waiting or running duplicate is
   refused, so a request redelivered after its first completed runs again unless its `sequence`
   refuses it.
-- **A `KeyedWrite`'s `coverage` is checked by the types only**: a value outside the four kinds is
-  stored as a status.
-- **`encode` sees only enumerable string-keyed fields and detects no cycle.** Symbol-keyed and
-  non-enumerable fields are neither checked nor frozen, so a reader can change them, and a cyclic
-  object throws a `RangeError` rather than `NotDataError`.
-- **A level write whose `value` is `undefined` is queued.** `encode` drops the field, so the push
-  does not throw; the step then fails the graph when the value is digested.
+- **`encode` sees only an object's enumerable string-keyed fields and detects no cycle.** What a
+  push, a clock or an effect writes is held without an object's symbol-keyed and non-enumerable
+  fields. A derived value keeps them, neither checked nor frozen, so a reader can change them. A
+  cyclic object throws a `RangeError` rather than `NotDataError`.
+- **A `Proxy` or a modified built-in is not detected.** A proxy's traps run while it is encoded and
+  frozen, so it can read differently each time; data is held as given, so a proxy was never
+  covered. Changing `Object` or `Array` built-ins changes what `encode` reads.
 - **A `sequence` position is not validated.** `NaN` passes the comparison, and once admitted, every
   later position passes too.
 - **An operator may reuse an earlier effect's id.** A `failed` entry's `origin` is then ambiguous,
   and a failure of a non-member operator named like a member effect halts instead of degrading.
 - **The builder is not consumed by `build()`.** The graph shares the builder's collections, so a
   declaration after `build()` changes the built graph; treat the builder as consumed.
+- **A slow step observer slows every step.** It runs synchronously inside the step, and nothing
+  bounds its time, so expiries, clocks and lane budgets see the later steps later than they would
+  without it.
+- **A step observer can act after it returns.** Work it schedules, such as a timer or the rest of an
+  async function, calls the runner as any caller would (§5.1).
+- **The engine contains what an observer returns, not what it does.** A promise it creates and
+  does not return, or a returned promise built to refuse a handler (a throwing `constructor`), can
+  still reject unhandled.
+- **A dropped step observer leaves no marker** in the journal; only `runner.observerFailed` says so.
 - **A finishing effect's failure is caught only for requests the stop started.** A `finishOnStop`
   request already running when the clean stop begins rejects into a finished runner, which ignores
   it, so `stopped` can resolve though that request failed.
 
-## 16. Traces
+## 17. Traces
 
 The scenario tests live in [`test/`](./test), one vitest file per module: the graph declaration
 (`graph.test.ts`), the runner, effects, lanes, expiries, the journal and recovery
 (`runner.test.ts`), keyed levels and maps (`keyed.test.ts`), replay (`replay.test.ts`),
-reachability (`reach.test.ts`), data (`data.test.ts`) and the package boundary (`package.test.ts`).
+reachability (`reach.test.ts`), descriptions (`describe.test.ts`) and their Markdown listing
+(`graph-markdown.test.ts`), data (`data.test.ts`) and the package boundary (`package.test.ts`).
 A trace this spec names by quotation is the title, or the start of the title, of a test or
 `describe` block in one of them; an `it.each` title is quoted by its start, with its cases named
 where they carry the claim.

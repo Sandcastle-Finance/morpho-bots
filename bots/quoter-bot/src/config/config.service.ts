@@ -2,6 +2,7 @@ import type { Finality } from '@repo/kit'
 import type { Address, Hex } from 'viem'
 
 import { getChainAddress } from '@morpho-org/morpho-ts'
+import { fundsStepBid } from '@repo/kit'
 import { inspect } from 'node:util'
 import { isAddressEqual } from 'viem'
 
@@ -28,6 +29,7 @@ import {
   positiveBigIntValue,
   positiveGweiWeiValue,
   positiveIntegerValue,
+  redeemWithdrawableValue,
   referenceLookbackSecondsValue,
   requestTimeoutValue,
   transactionReceiptTimeoutValue,
@@ -63,9 +65,16 @@ const writePolicyValue = (
   chainId: SetupCheckConfig['chainId']
 ): QuoterWritePolicy => {
   const maxFeePerGasWei = positiveGweiWeiValue(environment, 'MAX_FEE_GWEI')
+  const maxTransactionSpendWei = positiveBigIntValue(environment, 'MAX_TRANSACTION_SPEND_WEI')
+  if (!fundsStepBid(maxFeePerGasWei, maxTransactionSpendWei))
+    throw new ConfigValidationError(
+      'MAX_TRANSACTION_SPEND_WEI',
+      'out-of-range',
+      'MAX_FEE_GWEI with MAX_TRANSACTION_SPEND_WEI cannot fund a nonce fill and a step bid below it'
+    )
   return {
     maxFeePerGasWei,
-    maxTransactionSpendWei: positiveBigIntValue(environment, 'MAX_TRANSACTION_SPEND_WEI'),
+    maxTransactionSpendWei,
     maxPublicationGas: positiveBigIntValue(environment, 'MAX_PUBLICATION_GAS'),
     maxPublicationDataBytes: positiveIntegerValue(environment, 'MAX_PUBLICATION_DATA_BYTES'),
     maxCancellationGas: positiveBigIntValue(environment, 'MAX_CANCELLATION_GAS'),
@@ -199,9 +208,10 @@ export class ConfigService {
       morphoApiBaseUrl: urlValue(environment, 'MORPHO_API_BASE_URL'),
       v0OfferGroupIds: hexListValue(environment, 'V0_OFFER_GROUP_IDS', false),
       requestTimeoutMs: requestTimeoutValue(environment),
-      finality: finalityValue(environment),
+      finality: finalityValue(environment, chainId),
       transactionReceiptTimeoutMs: transactionReceiptTimeoutValue(environment),
       writePolicy,
+      redeemWithdrawable: redeemWithdrawableValue(environment),
       bootstrap,
       ladder
     })
@@ -220,6 +230,7 @@ export class ConfigService {
       finality: Finality
       transactionReceiptTimeoutMs: number
       writePolicy?: QuoterWritePolicy
+      redeemWithdrawable: boolean
       bootstrap: readonly TargetRateConfigured<ValidBootstrapConfig>[]
       ladder: readonly TargetRateConfigured<ValidLadderConfig>[]
     }
@@ -316,6 +327,14 @@ export class ConfigService {
    */
   get writePolicy() {
     return this.values.writePolicy
+  }
+
+  /**
+   * Exposes whether a market redeems withdrawable maker credit at par before it quotes.
+   * @returns `true` unless `REDEEM_WITHDRAWABLE` or YAML `redeemWithdrawable` is `false`.
+   */
+  get redeemWithdrawable() {
+    return this.values.redeemWithdrawable
   }
 
   /** Exposes position-bootstrap settings. @returns The validated ordered market list; `BOOTSTRAP_MARKETS` replaces YAML `bootstrap` as a whole. */

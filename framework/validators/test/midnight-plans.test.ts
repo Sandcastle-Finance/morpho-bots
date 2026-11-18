@@ -21,6 +21,7 @@ import {
   midnightCommitmentRead,
   midnightOffersValidator,
   midnightPublicationPlan,
+  midnightRedemption,
   midnightTreeWitness
 } from '../src'
 
@@ -50,8 +51,8 @@ const market = {
 }
 const NOW = BigInt(Date.UTC(2026, 9, 3) / 1000)
 
-const offer = (ratifier: Address, buy: boolean, tick: bigint) =>
-  Offer.create({
+const offer = (ratifier: Address, buy: boolean, tick: bigint) => {
+  const params: Parameters<typeof Offer.create>[0] = {
     market,
     buy,
     maker: maker.address,
@@ -62,7 +63,9 @@ const offer = (ratifier: Address, buy: boolean, tick: bigint) =>
     maxUnits: 1_000_000n,
     continuousFeeCap: 0n,
     ...(buy ? {} : { reduceOnly: true, receiverIfMakerIsSeller: maker.address })
-  } as Parameters<typeof Offer.create>[0])
+  }
+  return Offer.create(params)
+}
 
 /** A per-book ladder: one buy group of two offers, one reduce-only sell group. */
 const ladder = (ratifier: Address) =>
@@ -81,6 +84,16 @@ const context = { account: maker.address, chainId: CHAIN }
 const groupsOf = (tree: Tree) => [...new Set(tree.offers.map(o => midnightCommitmentId(o.group)))]
 
 describe('Midnight plans, as the validator reads them', () => {
+  it("withdraws the maker's credit to the maker, which the validator reads as committing nothing", () => {
+    expect(
+      validator.read(
+        midnightRedemption(CHAIN, maker.address, { market, units: 1_000n }),
+        undefined,
+        context
+      )
+    ).toEqual({ ok: true, creates: [], exposes: [], carries: [], retires: [], consumes: {} })
+  })
+
   it('signs an Ecrecover tree, then publishes a payload carrying that one signature over every group', async () => {
     const tree = ladder(ECRECOVER)
     const plan = midnightPublicationPlan({
@@ -96,9 +109,11 @@ describe('Midnight plans, as the validator reads them', () => {
       groupsOf(tree).toSorted()
     )
 
-    const signature = await maker.signTypedData(
-      EcrecoverRatifierUtils.typedData({ tree, chainId: CHAIN }) as never
-    )
+    const typedData: Parameters<typeof maker.signTypedData>[0] = EcrecoverRatifierUtils.typedData({
+      tree,
+      chainId: CHAIN
+    })
+    const signature = await maker.signTypedData(typedData)
     const built = await plan.materialize(
       { type: 'materialize', request: 0, intentId: 'publish', step: 1, signatures: [signature] },
       new AbortController().signal

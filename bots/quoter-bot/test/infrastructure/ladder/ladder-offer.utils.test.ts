@@ -14,7 +14,7 @@ import type {
 } from '../../../src/domain/ladder'
 import type { OpposingBookTicks } from '../../../src/infrastructure/ladder/ladder-cross-book.utils'
 
-import { generateLadder, offerCapsByRung, validateLadderConfig } from '../../../src/domain/ladder'
+import { generateLadder, validateLadderConfig } from '../../../src/domain/ladder'
 import { alignedRateTick, rateTickWindow } from '../../../src/domain/tick-window'
 import { calculateLadderCapacities } from '../../../src/infrastructure/ladder/ladder-capacity.utils'
 import { retainedOpposingBookTicks } from '../../../src/infrastructure/ladder/ladder-cross-book.utils'
@@ -81,17 +81,6 @@ const inRangeQuote: LadderQuoteSet = {
 }
 
 describe('buildLadderTree', () => {
-  test('derives exact production offer maxUnits for the [10,20,30,40] fixture in both modes', () => {
-    expect(offerCapsByRung(quote('shared-rung'))).toEqual({
-      lower: [10n, 20n],
-      higher: [30n, 40n]
-    })
-    expect(offerCapsByRung(quote('per-book'))).toEqual({
-      lower: [30n, 30n],
-      higher: [70n, 70n]
-    })
-  })
-
   test('maps lower sells and higher buys without crossing Midnight ticks', () => {
     const result = buildLadderTree({
       quote: quote('shared-rung'),
@@ -261,7 +250,7 @@ describe('buildLadderTree', () => {
     })
 
     expect(result.bookOffers.map(offer => ({ buy: offer.buy, tick: offer.tick }))).toEqual([
-      { buy: false, tick: alignedRateTick(480n, BigInt(market.params.maturity) - now, 1n) },
+      { buy: false, tick: 3_981n },
       { buy: false, tick: 3_993n },
       { buy: true, tick: 3_954n },
       { buy: true, tick: 3_937n }
@@ -685,11 +674,13 @@ describe('ladder offer caps', () => {
         minimumRateBps: 1n,
         maximumRateBps: 10_000n
       })
-      const caps = offerCapsByRung(quote(groupMode))
+      const caps = groupMode === 'per-book' ? [30n, 30n, 70n, 70n] : [10n, 20n, 30n, 40n]
 
       expect(tree.offers.map(offer => [offer.buy, offer.maxAssets, offer.maxUnits])).toEqual([
-        ...caps.lower.map(cap => [false, 0n, cap]),
-        ...caps.higher.map(cap => [true, 0n, cap])
+        [false, 0n, caps[0]],
+        [false, 0n, caps[1]],
+        [true, 0n, caps[2]],
+        [true, 0n, caps[3]]
       ])
     }
   )
@@ -767,7 +758,7 @@ describe('face acquired by a fully taken ladder', () => {
     })
     const { tree } = buildLadderTree({
       quote: generated,
-      market: maturing as unknown as IMarket,
+      market: maturing,
       maker,
       ratifier,
       now,
@@ -818,15 +809,7 @@ describe('snapshotRateWindow', () => {
   const range = { market, now, minimumRateBps: 300n, maximumRateBps: 600n, minimumOfferAssets: 1n }
 
   test('sizes rungs in units while the full window holds a tick', () => {
-    expect(snapshotRateWindow(range)).toEqual({
-      minimumOfferUnits: minimumOfferUnits({
-        minimumOfferAssets: 1n,
-        minimumRateBps: 300n,
-        maximumRateBps: 600n,
-        timeToMaturity: BigInt(market.params.maturity) - now,
-        tickSpacing: BigInt(market.tickSpacing)
-      })
-    })
+    expect(snapshotRateWindow(range)).toEqual({ minimumOfferUnits: 2n })
   })
 
   test('withdraws both sides instead of throwing when the full window holds no tick', () => {

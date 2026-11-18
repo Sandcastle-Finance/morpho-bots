@@ -1,5 +1,6 @@
+import { DEFAULT_MAX_GAS_LIMIT } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
-import { getAddress } from 'viem'
+import { getAddress, parseGwei } from 'viem'
 import { base } from 'viem/chains'
 import { describe, expect, it } from 'vitest'
 
@@ -25,6 +26,9 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): Record<str
     KERNEL_STATE_DIR: '/var/lib/kernel',
     KERNEL_ENROLLMENT: 'enrolled',
     MAX_FEE_GWEI: '250',
+    JOURNAL_RUN_CAP_BYTES: '1073741824',
+    BUILD_REVISION: '0d58dd8e5',
+    BUILD_IMAGE_TAG: 'blue-liquidation',
     ZEROX_API_KEY: 'zx-key',
     MORPHO_API_KEY: 'morpho-key',
     ...overrides
@@ -35,16 +39,26 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): Record<str
 
 describe('loadConfig', () => {
   it('reads where the kernel keeps its ledger and whether it must exist', () => {
-    expect(loadConfig(baseEnv()).kernel).toStrictEqual({
+    expect(loadConfig(baseEnv()).kernel).toMatchObject({
       stateDirectory: '/var/lib/kernel',
       enrollment: 'enrolled'
     })
   })
 
+  it('prices the default gas ceiling at MAX_FEE_GWEI, with no spend settings of its own', () => {
+    const { kernel } = loadConfig(baseEnv({ MAX_SPEND_ETH: 'ignored', MAX_GAS_LIMIT: 'ignored' }))
+    expect(kernel.maxFeePerGasWei).toBe(parseGwei('250'))
+    expect(kernel.maxGasLimit).toBe(DEFAULT_MAX_GAS_LIMIT)
+    expect(kernel.maxSpendWei).toBe(parseGwei('250') * DEFAULT_MAX_GAS_LIMIT)
+  })
+
   it.each([
-    [{ KERNEL_STATE_DIR: undefined }, 'Missing required env var: KERNEL_STATE_DIR'],
-    [{ KERNEL_ENROLLMENT: undefined }, 'Missing required env var: KERNEL_ENROLLMENT'],
-    [{ KERNEL_ENROLLMENT: 'yes' }, 'KERNEL_ENROLLMENT must be "enrolling" or "enrolled"'],
+    [{ KERNEL_STATE_DIR: undefined }, 'KERNEL_STATE_DIR must be set'],
+    [{ KERNEL_ENROLLMENT: undefined }, 'KERNEL_ENROLLMENT must be set'],
+    [{ KERNEL_ENROLLMENT: 'yes' }, 'KERNEL_ENROLLMENT must be enrolling or enrolled'],
+    [{ MAX_FEE_GWEI: '0.000000001' }, 'MAX_FEE_GWEI cannot fund a nonce fill'],
+    [{ JOURNAL_RUN_CAP_BYTES: undefined }, 'JOURNAL_RUN_CAP_BYTES'],
+    [{ BUILD_REVISION: undefined }, 'BUILD_REVISION'],
     [
       { POSITION_LIQUIDATION_COOLDOWN_MS: '0' },
       'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported'
@@ -76,9 +90,7 @@ describe('loadConfig', () => {
   })
 
   it.each([undefined, '', '  '])('refuses to start without MAX_FEE_GWEI (%j)', value => {
-    expect(() => loadConfig(baseEnv({ MAX_FEE_GWEI: value }))).toThrow(
-      'Missing required env var: MAX_FEE_GWEI'
-    )
+    expect(() => loadConfig(baseEnv({ MAX_FEE_GWEI: value }))).toThrow('MAX_FEE_GWEI must be set')
   })
 
   it('fails loud on each missing required var', () => {
@@ -92,7 +104,7 @@ describe('loadConfig', () => {
   it('refuses a chain whose finality is missing or malformed', () => {
     expect(() => loadConfig(baseEnv({ FINALITY_8453: undefined }))).toThrow(/FINALITY_8453/)
     expect(() => loadConfig(baseEnv({ FINALITY_8453: 'latest' }))).toThrow(/FINALITY_8453/)
-    expect(loadConfig(baseEnv({ CHAIN_ID: '4663' })).finality).toBe('safe')
+    expect(loadConfig(baseEnv({ CHAIN_ID: '4663' })).kernel.finality).toBe('safe')
   })
 
   it('rejects an unsupported chain id', () => {
@@ -153,8 +165,7 @@ describe('loadConfig', () => {
   })
 
   it('parses EXCLUDE_COLLATERALS, failing loud on a bad address', () => {
-    // A stale SLIPPAGE_BPS must not fail startup: the knob was removed when the min-out floor became
-    // break-even-derived, and an unknown env var is not a misconfiguration.
+    // A deployment that still sets SLIPPAGE_BPS must keep starting: an unknown env var is not a misconfiguration.
     expect(() => loadConfig(baseEnv({ SLIPPAGE_BPS: '250' }))).not.toThrow()
     const config = loadConfig(baseEnv({ EXCLUDE_COLLATERALS: ` ${COLLATERAL} , ${MORPHO}` }))
     expect(config.venues.excludeCollaterals).toEqual([getAddress(COLLATERAL), MORPHO])

@@ -2,7 +2,6 @@ import type { ValidatorReading, Validator } from '@repo/kernel'
 import type {
   Abi,
   Address,
-  DecodeFunctionDataParameters,
   DecodeFunctionDataReturnType,
   EncodeFunctionDataParameters,
   Hex
@@ -74,7 +73,7 @@ const decodeExact = <const abi extends Abi>(
   abi: abi,
   data: Hex
 ): DecodeFunctionDataReturnType<abi> => {
-  const decoded = decodeFunctionData({ abi, data } as DecodeFunctionDataParameters<abi>)
+  const decoded = decodeFunctionData({ abi, data })
   const encoded = encodeFunctionData({
     abi,
     functionName: decoded.functionName,

@@ -11,6 +11,7 @@ import {
   validateJournalLimits
 } from '@repo/engine'
 import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import * as fileSystem from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
@@ -27,6 +28,11 @@ export const KEPT_JOURNAL_RUN_CAPS = 3
 export const KEPT_RUN_MAX_CAPS = 2
 /** The smallest `JOURNAL_RUN_CAP_BYTES` a bot accepts, so a mistyped cap cannot restart it every few heads. */
 export const MIN_JOURNAL_RUN_CAP_BYTES = 64 * 1024 * 1024
+/** A `failed` entry's description is a short code, never a message or URL; a bot returns only fixed ones. */
+const FAILURE_CODE = /^[a-z][a-z0-9_]{0,31}$/
+const UNDESCRIBED_FAILURE = 'undescribed'
+/** Large enough that reading a 1 GiB file is not dominated by per-chunk overhead. */
+const READ_CHUNK_BYTES = 256 * 1024
 const JOURNAL_FILE_NAME = /^(\d+)-[A-Za-z0-9][A-Za-z0-9_-]*\.journal\.jsonl$/
 
 export type JournalBuildIdentity = Readonly<{
@@ -42,30 +48,22 @@ export type JournalHeader = Readonly<{
   run: string
   startedAt: number
   build: JournalBuildIdentity
+  /** What the bot built its graph from, so a replay can build the same graph. */
+  settings?: Readonly<Record<string, Data>>
 }>
 
 type JournalEnd = Readonly<{ type: 'end'; endedAt: number }>
 
-export type JournalReadResult =
-  | Readonly<{
-      status: 'clean'
-      header: JournalHeader
-      entries: readonly JournalEntry[]
-      end: JournalEnd
-    }>
-  | Readonly<{
-      status: 'truncated'
-      header?: JournalHeader
-      entries: readonly JournalEntry[]
-      truncatedBytes: number
-    }>
-  | Readonly<{
-      status: 'corrupt'
-      header?: JournalHeader
-      entries: readonly JournalEntry[]
-      line: number
-      reason: string
-    }>
+/** How a journal file ended: its end record, a torn or missing tail, or the first invalid line. */
+export type JournalReadOutcome =
+  | Readonly<{ status: 'clean'; end: JournalEnd }>
+  | Readonly<{ status: 'truncated'; truncatedBytes: number }>
+  | Readonly<{ status: 'corrupt'; line: number; reason: string }>
+
+export type JournalRead =
+  | Readonly<{ kind: 'header'; header: JournalHeader }>
+  | Readonly<{ kind: 'entry'; line: number; entry: JournalEntry }>
+  | (Readonly<{ kind: 'outcome' }> & JournalReadOutcome)
 
 export type JournalWritableFile = Pick<FileHandle, 'writeFile' | 'datasync' | 'sync' | 'close'>
 export type JournalFileSystem = Readonly<{
@@ -77,7 +75,6 @@ export type JournalFileSystem = Readonly<{
     data: Buffer,
     options: { signal?: AbortSignal }
   ) => Promise<void>
-  readFile: (path: string) => Promise<Buffer>
   readdir: (path: string) => Promise<string[]>
   lstat: (path: string) => Promise<Readonly<{ size: number; isFile: () => boolean }>>
   unlink: (path: string) => Promise<void>
@@ -142,10 +139,18 @@ export type JournalFileOptions = Readonly<{
   /** The size at which this run's file resolves `runCapReached`; appends still land past it. */
   runCapBytes: number
   runId?: string
+  /** Recorded in the header; never a key or a credential. */
+  settings?: Readonly<Record<string, Data>>
   now?: () => number
   ioTimeoutMs?: number
+  /** Anything but a {@link FAILURE_CODE} is written as `undescribed`. */
   describe?: (error: unknown) => string
 }>
+
+const describedAsCode = (describe: (error: unknown) => string) => (error: unknown) => {
+  const code: unknown = describe(error)
+  return typeof code === 'string' && FAILURE_CODE.test(code) ? code : UNDESCRIBED_FAILURE
+}
 
 const imageTag = (value: unknown) =>
   typeof value === 'string' &&
@@ -264,7 +269,8 @@ export const createJournalFileSink = async (
     graph: options.graph,
     run,
     startedAt,
-    build: options.build
+    build: options.build,
+    ...(options.settings && { settings: options.settings })
   }
   const path = join(options.directory, `${startedAt}-${run}${JOURNAL_FILE_SUFFIX}`)
   let encodedHeader: Buffer
@@ -421,7 +427,7 @@ export const createJournalFileSink = async (
     sink,
     capacityBytes: options.capacityBytes,
     ...(options.ioTimeoutMs !== undefined && { ioTimeoutMs: options.ioTimeoutMs }),
-    ...(options.describe && { describe: options.describe })
+    ...(options.describe && { describe: describedAsCode(options.describe) })
   }
   return { path, header, journal, finalize, pruned, runCapReached: runCap.promise }
 }
@@ -511,15 +517,12 @@ const journalEntry = (value: unknown): value is JournalEntry => {
 
 const journalHeader = (value: unknown): value is JournalHeader =>
   record(value) &&
-  exactFields(value, [
-    'build',
-    'fileFormat',
-    'graph',
-    'journalFormat',
-    'run',
-    'startedAt',
-    'type'
-  ]) &&
+  exactFields(
+    value,
+    ['build', 'fileFormat', 'graph', 'journalFormat', 'run', 'startedAt', 'type'],
+    ['settings']
+  ) &&
+  (value.settings === undefined || record(value.settings)) &&
   value.type === 'header' &&
   value.fileFormat === JOURNAL_FILE_FORMAT &&
   value.journalFormat === JOURNAL_FORMAT &&
@@ -536,23 +539,13 @@ const journalEnd = (value: unknown): value is JournalEnd =>
 
 type ReadState = {
   header?: JournalHeader
-  entries: JournalEntry[]
   end?: JournalEnd
-  deltas?: Parameters<typeof expandJournalWrite>[1]
+  deltas: Parameters<typeof expandJournalWrite>[1]
 }
-
-const corruption = (state: ReadState, line: number, reason: string): JournalReadResult => ({
-  status: 'corrupt',
-  ...(state.header && { header: state.header }),
-  entries: state.entries,
-  line,
-  reason
-})
 
 const invalidStepWrites = (entry: Extract<JournalEntry, { kind: 'step' }>, state: ReadState) => {
   for (const write of entry.writes) {
-    if (state.deltas && expandJournalWrite(write, state.deltas) === undefined)
-      return 'invalid keyed delta chain'
+    if (expandJournalWrite(write, state.deltas) === undefined) return 'invalid keyed delta chain'
   }
   return undefined
 }
@@ -564,20 +557,27 @@ const invalidEntryWrites = (entry: JournalEntry, state: ReadState) => {
   return undefined
 }
 
-const readLine = (line: string, index: number, state: ReadState): JournalReadResult | undefined => {
+const corrupt = (line: number, reason: string): JournalRead => ({
+  kind: 'outcome',
+  status: 'corrupt',
+  line,
+  reason
+})
+
+const readLine = (text: string, line: number, state: ReadState): JournalRead | undefined => {
   let frame: Data
   try {
-    frame = decode(line)
-    if (encode(frame) !== line) return corruption(state, index + 1, 'non-canonical encoding')
+    frame = decode(text)
+    if (encode(frame) !== text) return corrupt(line, 'non-canonical encoding')
   } catch {
-    return corruption(state, index + 1, 'invalid encoding')
+    return corrupt(line, 'invalid encoding')
   }
-  if (index === 0) {
-    if (!journalHeader(frame)) return corruption(state, 1, 'invalid header')
+  if (line === 1) {
+    if (!journalHeader(frame)) return corrupt(1, 'invalid header')
     state.header = frame
-    return undefined
+    return { kind: 'header', header: frame }
   }
-  if (!record(frame)) return corruption(state, index + 1, 'invalid frame')
+  if (!record(frame)) return corrupt(line, 'invalid frame')
   if (
     frame.type === 'entry' &&
     exactFields(frame, ['entry', 'type']) &&
@@ -585,49 +585,50 @@ const readLine = (line: string, index: number, state: ReadState): JournalReadRes
     !state.end
   ) {
     const reason = invalidEntryWrites(frame.entry, state)
-    if (reason) return corruption(state, index + 1, reason)
-    state.entries.push(frame.entry)
-    return undefined
+    return reason ? corrupt(line, reason) : { kind: 'entry', line, entry: frame.entry }
   }
   if (journalEnd(frame) && !state.end) {
     state.end = frame
     return undefined
   }
-  return corruption(state, index + 1, 'invalid frame order or shape')
+  return corrupt(line, 'invalid frame order or shape')
 }
 
-export const readJournalFile = async (
-  path: string,
-  fs: Pick<JournalFileSystem, 'readFile'> = defaultFileSystem
-): Promise<JournalReadResult> => {
-  const bytes = await fs.readFile(path)
-  const terminated = bytes.at(-1) === 0x0a
-  const finalBreak = bytes.lastIndexOf(0x0a)
-  const completeBytes = terminated ? bytes : bytes.subarray(0, finalBreak + 1)
-  const truncatedBytes = terminated ? 0 : bytes.length - finalBreak - 1
-  const state: ReadState = { entries: [], deltas: new Map() }
+/**
+ * Reads a journal file one line at a time, holding only the line being read and each keyed node's
+ * last complete write, so memory stays bounded by the longest line and the graph's state, not the
+ * file. Its last item is always the outcome; a corrupt line ends it after the valid prefix.
+ */
+export async function* readJournalFile(path: string): AsyncGenerator<JournalRead> {
+  const state: ReadState = { deltas: new Map() }
   const decoder = new TextDecoder('utf-8', { fatal: true })
-  let lineStart = 0
+  let tail: Buffer[] = []
   let line = 0
-  for (let index = 0; index < completeBytes.length; index++) {
-    if (completeBytes[index] !== 0x0a) continue
-    let decoded: string
-    try {
-      decoded = decoder.decode(completeBytes.subarray(lineStart, index))
-    } catch {
-      return corruption(state, line + 1, 'invalid utf-8')
+  for await (const chunk of createReadStream(path, {
+    highWaterMark: READ_CHUNK_BYTES
+  }) as AsyncIterable<Buffer>) {
+    let start = 0
+    for (let end = chunk.indexOf(0x0a); end !== -1; end = chunk.indexOf(0x0a, start)) {
+      const piece = chunk.subarray(start, end)
+      const bytes = tail.length === 0 ? piece : Buffer.concat([...tail, piece])
+      tail = []
+      start = end + 1
+      line += 1
+      let text: string
+      try {
+        text = decoder.decode(bytes)
+      } catch {
+        yield corrupt(line, 'invalid utf-8')
+        return
+      }
+      const read = readLine(text, line, state)
+      if (read) yield read
+      if (read?.kind === 'outcome') return
     }
-    lineStart = index + 1
-    const failed = readLine(decoded, line++, state)
-    if (failed) return failed
+    if (start < chunk.length) tail.push(chunk.subarray(start))
   }
-
-  if (!terminated || !state.end || !state.header)
-    return {
-      status: 'truncated',
-      ...(state.header && { header: state.header }),
-      entries: state.entries,
-      truncatedBytes
-    }
-  return { status: 'clean', header: state.header, entries: state.entries, end: state.end }
+  const truncatedBytes = tail.reduce((total, piece) => total + piece.length, 0)
+  yield truncatedBytes === 0 && state.header && state.end
+    ? { kind: 'outcome', status: 'clean', end: state.end }
+    : { kind: 'outcome', status: 'truncated', truncatedBytes }
 }

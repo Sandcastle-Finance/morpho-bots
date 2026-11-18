@@ -5,18 +5,20 @@ import { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS } from '@repo/engine'
 import { tryCatch } from '@repo/utils'
 
 import type { WhitelistSource } from './discovery/markets'
-import type { LiquidatorOptions } from './graph'
+import type { LiquidatorDeps } from './graph'
+import type { LiquidatorSettings } from './settings'
 
 import { declareLiquidator } from './graph'
 
 /**
  * Runs the liquidator until its kernel stops.
- * @param now - The one clock the kernel and the runner share.
+ * @param now - The one clock the kernel, the runner and preparations share.
  * @param markets.initial - The whitelist's sources as the startup refresh left them.
  * @param journal - The run's journal; it is finalized if the graph or the runner cannot be created.
  */
 export const startLiquidator = async (
-  options: LiquidatorOptions & {
+  settings: LiquidatorSettings,
+  options: Omit<LiquidatorDeps, 'now'> & {
     now?: () => number
     journal: NonNullable<RunnerOptions['journal']>
     markets: Readonly<{ initial: readonly WhitelistSource[] }>
@@ -27,9 +29,10 @@ export const startLiquidator = async (
   let runner: Runner
   let nodes: Omit<ReturnType<typeof declareLiquidator>, 'graph'>
   try {
-    const { graph, ...declared } = declareLiquidator({
+    const { graph, ...declared } = declareLiquidator(settings, {
       ...options,
-      kernel: { ...options.kernel, now }
+      kernel: { ...options.kernel, now },
+      now
     })
     nodes = declared
     runner = createRunner(graph, { now, journal })

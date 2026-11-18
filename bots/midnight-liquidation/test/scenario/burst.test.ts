@@ -18,10 +18,13 @@ const bots: Bot[] = []
 beforeEach(() => {
   vi.useFakeTimers({ now: 1_800_000_000_000 })
 })
+/** Each shutdown replays its bot's whole journal, thousands of steps after a burst. */
+const SHUTDOWN_TIMEOUT_MS = 60_000
+
 afterEach(async () => {
   for (const bot of bots.splice(0)) await bot.shutdown()
   vi.useRealTimers()
-})
+}, SHUTDOWN_TIMEOUT_MS)
 
 /** Moves fake time until `done`, failing once `limitMs` of it has passed; `each` runs every step. */
 const advanceUntil = async (
@@ -42,14 +45,14 @@ const advanceUntil = async (
 
 /** Moves fake time until a 2s window passes with no firm quote asked. */
 const quiesce = async (bot: Bot) => {
-  for (let quotes = -1; quotes !== bot.world.quotes; ) {
+  for (let quotes = -1; quotes !== bot.world.quotes;) {
     quotes = bot.world.quotes
     await vi.advanceTimersByTimeAsync(2_000)
   }
 }
 
 const started = async (parameters: Parameters<typeof startBot>[0]) => {
-  const bot = await startBot(parameters)
+  const bot = await startBot({ ...parameters, inMemory: true })
   bots.push(bot)
   await advanceUntil(() => bot.state().lifecycle.kind === 'running', 'running kernel', {
     limitMs: 10_000
@@ -219,16 +222,13 @@ describe('the ordering of a better position behind failing ones (D4)', () => {
   type Variant = Readonly<{ costed: boolean; fallbackMs: number; http?: Http; lanes?: number }>
 
   const measure = async ({ costed, fallbackMs, http, lanes = 4 }: Variant) => {
-    const failing = Array.from(
-      { length: 4 },
-      (_, market): Position => ({
-        market,
-        borrower: borrowerAt(10 + market),
-        slots: [0, 2, 3, 4],
-        amounts: { 0: 800n, 2: 20n, 3: 20n, 4: 20n },
-        unhealthy: true
-      })
-    )
+    const failing = Array.from({ length: 4 }, (_, market): Position => ({
+      market,
+      borrower: borrowerAt(10 + market),
+      slots: [0, 2, 3, 4],
+      amounts: { 0: 800n, 2: 20n, 3: 20n, 4: 20n },
+      unhealthy: true
+    }))
     const better: Position = {
       market: 4,
       borrower: borrowerAt(14),

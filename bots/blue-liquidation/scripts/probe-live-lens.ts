@@ -6,7 +6,7 @@
  * real borrowers.
  *
  * Usage (needs a Base RPC; no anvil required):
- *   RPC_URL=https://… pnpm --filter @morpho-org/blue-liquidation run probe:lens
+ *   RPC_URL=https://… bun run --filter @morpho-org/blue-liquidation probe:lens
  */
 import type { Address, Hex } from 'viem'
 
@@ -64,12 +64,12 @@ async function main() {
       seen.add(key)
       let params = paramsCache.get(id)
       if (!params) {
-        params = (await readContract(baseClient, {
+        params = await readContract(baseClient, {
           address: MORPHO,
           abi: MorphoAbi,
           functionName: 'idToMarketParams',
           args: [id]
-        })) as MarketParams
+        })
         paramsCache.set(id, params)
       }
       pairs.push({ params, borrower })

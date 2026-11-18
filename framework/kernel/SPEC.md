@@ -8,7 +8,7 @@ kernel authorizes against declared evidence".
   TypeScript, `reduce(state, event) → { state, commands, activity }`. Where the prose and the reducer disagree,
   the reducer is wrong or the prose is. Either way it is a bug in this spec.
 - [`test/`](./test) holds the adversarial event traces as vitest tests (§16).
-- Run them with `pnpm --filter @repo/kernel run test` and `pnpm --filter @repo/kernel run typecheck`.
+- Run them with `bun run --cwd framework/kernel test` and `bun run --cwd framework/kernel typecheck`.
 
 A kernel is one reducer per `(signing account, chain)`. It is the only code that signs, broadcasts, or
 releases a signature, and the only code that changes the ledger. Everything handed to it is untrusted
@@ -182,14 +182,15 @@ non-positive ceiling is refused, and a submission id is bound to it as well as t
 A dependent step (no payload at admission) is materialized by the untrusted builder and then
 authorized the same way: its payload kind must match its step kind, and anything it retires must be
 owned. It must also pass the **envelope fit**. Every created id must be in the envelope, still
-`intended` (a builder cannot re-create, and so demote, a commitment already signed or out), with cap,
-expiry, and each resource no greater than admitted (three distinct refusals: outside the envelope,
-already out, beyond its admitted bounds). Its `consumes` must fit what is **unallocated**: the
+`intended` (a builder cannot re-create, and so demote, a commitment already signed or out), with its
+admitted exposure, and with cap, expiry, and each resource no greater than admitted (four distinct
+refusals: outside the envelope, already out, an exposure other than admitted, beyond its admitted
+bounds). Its `consumes` must fit what is **unallocated**: the
 envelope minus what is committed and minus what later known steps were admitted with, so a dependent
 step can never spend a later step's allowance. Its `exposes` must name this plan's entries. At every
 commit point the kernel re-checks that cumulative committed consumption stays within the envelope. A plan can therefore neither introduce an
 unreserved commitment later nor understate one at admission. The reservation is sized from what the
-validator read, and anything later must fit inside it ("a dependent step cannot re-create a commitment an earlier step already signed", "a builder that re-materializes a live commitment cannot demote or delete it", "a dependent step that grows the cap of a still-intended commitment is refused by the cap check", "a dependent step cannot spend the allowance a later known step was admitted with", "a step whose kind disagrees with its payload is refused, so a transaction is never signed or released outside the slot").
+validator read, and anything later must fit inside it ("a dependent step cannot re-create a commitment an earlier step already signed", "a builder that re-materializes a live commitment cannot demote or delete it", "a dependent step that grows the cap of a still-intended commitment is refused by the cap check", "a dependent step cannot sign a commitment admitted on inclusion", "a dependent step cannot spend the allowance a later known step was admitted with", "a step whose kind disagrees with its payload is refused, so a transaction is never signed or released outside the slot").
 
 ### 4.3 Execution states
 
@@ -946,6 +947,7 @@ JSON of the real function and argument names) where the production validator
 | release to `midnight-api` (`mempoolValidate`)               | tree    | the same as a signed publish                                                                                                                                    |
 | `setIsRootRatified(maker = account, root, true)`            | tree    | root check; offers must have the Setter ratifier; `creates` one `inclusion` commitment per group                                                                |
 | `setConsumed(group, type(uint128).max, account)`            | —       | `retires [midnight:group]`                                                                                                                                      |
+| `withdraw(market, units > 0, maker, maker)`, not batched    | —       | nothing; the market must be allowlisted on this Midnight ([validators SPEC §5](../validators/SPEC.md#5-midnight-redemption))                                    |
 | anything else, including partial `setConsumed` and unratify | —       | refused                                                                                                                                                         |
 
 Per group: `cap = max(maxAssets)` over its offers, because the bucket is shared and the largest cap
@@ -1266,6 +1268,8 @@ and `Halt` to `nodes.requests`, or emits them from its library folds into the no
 `requests`, and
 reads `nodes.state`, `nodes.activity`, `nodes.heads` and `nodes.commands`, the commands each
 transition issues, which the controller reads to check that an act's facts reach the kernel.
+`nodes.tick` is the kernel's poll clock, a member of its recovery scope, so what reads it outside
+that scope is no longer routed once the graph degrades (untested).
 `kernel.start(runner)` requires `runner.hasJournal`; otherwise it rejects with
 `KernelJournalRequiredError` before pushing `Start` ("refuses to start without a journal before
 pushing Start").
@@ -1308,14 +1312,18 @@ activity. The host declares:
   as refused, when the finalized block lags the head by `reorgDepth` or more ("refuses to start
   when finality lags the head past its reorg window"). It links the window from finality (or
   `reorgDepth` below the head) to the head and delivers its blocks within `max(maxSimLagBlocks,
-maxEvidenceAgeBlocks)` of the head, the heights a simulation or fact may still be read at ("links
+  maxEvidenceAgeBlocks)` of the head, the heights a simulation or fact may still be read at ("links
   its first window down to finality a bounded batch at a time, handing over only usable heads"),
   and guarantees:
   - every chain read after `Start`, nonce lookups included, runs in the one serialized poll, so no read observes
     state another invalidated mid-flight; a reset or rollback also bumps a generation that every
     read checks before it delivers ("finishes a slow vouch inside its poll, so it never checks an
     anchor that moved on", "reads nothing at a tip fetched before the finalized chain was found
-    replaced", "drops a nonce lookup whose vouch finds the finalized chain replaced");
+    replaced", "drops a nonce lookup whose vouch finds the finalized chain replaced"). Within a
+    poll, a tip's receipt, commitment and capacity reads go out after its nonce in bounded waves
+    and are delivered in poll order ("sends a tip's reads in bounded waves instead of one after
+    another"); a poll that stops early lets its started reads settle before the next poll begins
+    ("lets a stopped poll's started reads settle before the next poll begins");
   - every block delivered as a `Head`, each fetched parent checked against the link it continues,
     so a source that changes forks mid-walk delivers nothing, with a walk's parents read a bounded
     batch at a time, so a poll gap of many fast blocks costs a few round trips, not one per block
@@ -1360,8 +1368,14 @@ the abort late (review).
 
 **The kernel is its graph's recovery.** When any other operator or effect in the bot's graph fails,
 the runner stops the rest, and the kernel halts and runs on alone until it stops, withdrawing what it
-holds; the runner's `stopped` then rejects with a `GraphFailedError` carrying the kernel's report. A
-failure inside the kernel stops the runner at once. When the journal fails or overflows, the kernel
+holds; the runner's `stopped` then rejects with a `GraphFailedError` carrying the kernel's report,
+and the error itself as its `cause`, for the bot to handle as its own. The halt's reason is
+`<origin> failed`, naming where it failed and reading nothing from the error as text, since any
+operator or effect may throw an error whose class, `name`, message or fields carry data; only the
+journal's failures, a case the kernel knows, add a fixed code: `overflow`, `io_timeout`, a
+filesystem errno such as `EIO`, else `io` ("halts and stops cleanly when a bot operator fails in the
+step that starts it, naming only the node", "halts a kernel composed into a bot graph into recovery
+when the journal fails"). A failure inside the kernel stops the runner at once. When the journal fails or overflows, the kernel
 halts into recovery; no send waits on the journal. `runner.abandon()` aborts every effect still
 waiting and resolves once writes already handed to the store have settled, so a restart never races
 an older write. The crash-injection suite (`host.anvil.test.ts`) uses it to restart the kernel on a
@@ -1376,9 +1390,14 @@ The kernel path signs with the signer's `sign` and hands off with its `broadcast
 sits between them (review).
 
 **Configuration.** `KernelConfig` ([`types.ts`](./src/types.ts)) and `KernelHostOptions`
-([`host.ts`](./src/host.ts)) are fixed at construction. `maxEvidenceAgeBlocks` is range-checked by the
-kernel and `pollMs` must be positive, as every clock's period is (untested); every other value is trusted as
-given ("refuses a configured bound that is not an integer in its range").
+([`host.ts`](./src/host.ts)) are fixed at construction, and a numeric option outside its range is
+refused then with a `KernelConfigError` naming the option and the range. `createKernel` holds
+`maxEvidenceAgeBlocks` to an integer in [0, 2³²], `maxSimLagBlocks` and `latchBoundBlocks` to
+[0, 2³²], `stuckBlocks` to [1, 2³²], `recoveryBoundMs`, `revokeAfterStaleMs`,
+`maxRecoveryAttempts` and `maxDispatchLagMs` to [1, 2⁵³ − 1], and `feeReserve` to a positive bigint
+("refuses a fee reserve that is not a positive bigint"). Declaring the host holds `reorgDepth` to
+[1, 2³²], and `pollMs` and `effectTimeoutMs` to [1, 2³¹ − 1], the longest timer Node runs. Every other value is trusted as
+given.
 
 | Option                                     | What it bounds                                                                                                            |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
@@ -1488,7 +1507,9 @@ work: refused while the kernel is latched or recovering").
 
 - **Recovery's limits are per process.** A restart starts every loaded entry's `recoveryAttempts`
   at zero and `recoveryBoundMs` from the new recovery, so a process that restarts after each unsafe
-  stop retries recovery without a total bound; each neutralizer's fee is still bounded.
+  stop retries recovery without a total bound; each neutralizer's fee is still bounded. The hard cap
+  is the signer's native balance. Each bot logs that balance as `signer.balance`, so a deployment
+  detects a recovery loop outside the kernel by alerting when it falls faster than normal spend.
 
 - **The event envelope is not validated.** The reducer checks that an event can be cloned, not its
   shape, so a cloneable but malformed event, such as a `Submit` whose `plan` is `null`, throws inside
@@ -1533,7 +1554,7 @@ work: refused while the kernel is latched or recovering").
   commitment never lands on a new one with the same id. Its id stays refused and memory grows with
   offers retired since the last start (they are never durable, so a restart clears them).
 - **The reducer is tested, not proved.** Its traces are checked by a mutation pass kept beside them
-  (`pnpm --filter @repo/kernel run mutate`): every single-guard mutation in
+  (`bun run --cwd framework/kernel mutate`): every single-guard mutation in
   [`scripts/mutations.ts`](./scripts/mutations.ts) is caught by a trace or, where it names the guard
   that covers it, once that cover is disabled too.
 

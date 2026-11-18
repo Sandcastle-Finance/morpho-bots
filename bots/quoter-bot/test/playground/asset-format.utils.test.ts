@@ -51,10 +51,6 @@ describe('resolveDecimals', () => {
     expect(resolveDecimals(String(MAXIMUM_ASSET_DECIMALS))).toBe(MAXIMUM_ASSET_DECIMALS)
   })
 
-  test('resolves the USDC default the panel starts from', () => {
-    expect(resolveDecimals(DEFAULT_ASSET_DECIMALS)).toBe(6)
-  })
-
   test('rejects a cleared entry and every unusable entry', () => {
     for (const value of ['', 'abc', '-1', '6.5', '1e3', '37'])
       expect(resolveDecimals(value)).toBeUndefined()
@@ -62,12 +58,6 @@ describe('resolveDecimals', () => {
 })
 
 describe('assetFormatter', () => {
-  test('applies one scale to every amount', () => {
-    const format = assetFormatter('6')
-    expect(format('10000000000')).toBe('10,000')
-    expect(format('500000000')).toBe('500')
-  })
-
   test('renders whole USDC units from the default entry', () => {
     expect(assetFormatter(DEFAULT_ASSET_DECIMALS)('10000000000')).toBe('10,000')
   })

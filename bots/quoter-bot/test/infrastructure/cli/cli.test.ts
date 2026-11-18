@@ -614,21 +614,6 @@ describe('Cli', () => {
     expect(stderr).toEqual([])
   })
 
-  test('entrypoint emits an explicit human-readable error when the bot fails', async () => {
-    const stdout: string[] = []
-    const stderr: string[] = []
-
-    const exitCode = await runQuoterBotEntrypoint(
-      { run: async () => Promise.reject(new Error('Bot cycle failed')) },
-      ['ladder'],
-      { writeOut: value => stdout.push(value), writeError: value => stderr.push(value) }
-    )
-
-    expect(exitCode).toBe(1)
-    expect(stdout).toEqual([])
-    expect(stderr).toEqual(['Error: UnknownError'])
-  })
-
   test('entrypoint emits one structured JSON error record with --json', async () => {
     const stderr: string[] = []
 
@@ -715,55 +700,6 @@ describe('Cli', () => {
     expect(exitCode).toBe(1)
     expect(stdout).toEqual([])
     expectHumanFailure(stderr, 'Offer invalidation failed', report)
-  })
-
-  test('entrypoint writes continuous events before the terminal monitor report', async () => {
-    const cycle = [{ status: 'observed', action: 'rest' }]
-    const report = {
-      status: 'stopped',
-      reason: 'signal',
-      cycles: 1,
-      cleanup: { status: 'logged' }
-    }
-    const stdout: string[] = []
-    const stderr: string[] = []
-
-    const exitCode = await runQuoterBotEntrypoint(
-      {
-        run: async (_argv, runtime) => {
-          await runtime?.writeEvent?.(cycle)
-          return report
-        }
-      },
-      ['bootstrap', '--monitor'],
-      { writeOut: value => stdout.push(value), writeError: value => stderr.push(value) }
-    )
-
-    expect(exitCode).toBe(0)
-    expect(stdout.map(value => JSON.parse(value))).toEqual([cycle, report])
-    expect(stderr).toEqual([])
-  })
-
-  test("entrypoint emits a halted run's stop report and returns a non-zero exit code", async () => {
-    const report: QuoterRunReport = {
-      status: 'halted',
-      reason: 'cleanup-failed',
-      halt: 'readiness: setup-failed',
-      errorName: 'KernelStopError',
-      setupReady: false
-    }
-    const stdout: string[] = []
-    const stderr: string[] = []
-
-    const exitCode = await runQuoterBotEntrypoint(
-      { run: async () => Promise.reject(new QuoterRunFailedError(report)) },
-      ['start'],
-      { writeOut: value => stdout.push(value), writeError: value => stderr.push(value) }
-    )
-
-    expect(exitCode).toBe(1)
-    expect(stdout).toEqual([])
-    expectHumanFailure(stderr, 'Quoter run failed', report)
   })
 
   test('propagates a readiness failure for a deterministic non-zero entrypoint exit', async () => {

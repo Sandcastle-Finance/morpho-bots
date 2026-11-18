@@ -1,8 +1,13 @@
 import type { Address, Hex } from 'viem'
 
+import { blockTagAt } from '@repo/kit'
 import { describe, expect, test, vi } from 'vitest'
 
-import type { WorldOwnership, WorldValue } from '../../../src/application/engine/world'
+import type {
+  WorldOwnership,
+  WorldPosition,
+  WorldValue
+} from '../../../src/application/engine/world'
 
 import { bootstrapReading } from '../../../src/application/engine/bootstrap-state'
 import { exposureSnapshot } from '../../../src/application/engine/exposure'
@@ -12,18 +17,21 @@ import { ConfigService } from '../../../src/config/config.service'
 import { BootstrapAdapterError, LadderAdapterError } from '../../../src/errors'
 import { readWorld } from '../../../src/infrastructure/engine/quoter-sources'
 import { createWorldReads } from '../../../src/infrastructure/engine/world-reads'
+import { marketParams } from './world.fixtures'
 
 type Market = {
   maturity: bigint
   tickSpacing: number
   continuousFee: number
   lossFactor: bigint
-  collateralParams?: { token: Address; lltv: bigint }[]
 }
 type Chain = {
   timestamp: bigint
   markets: Record<Hex, Market>
-  positions: Record<Hex, { credit: bigint; debt: bigint; collateral?: bigint[] }>
+  positions: Record<
+    Hex,
+    { credit: bigint; debt: bigint; loanCollateral?: WorldPosition['loanCollateral'] }
+  >
   cash: bigint
   allowance: bigint
   consumed: Record<string, bigint>
@@ -37,26 +45,6 @@ let pinned: { read: string; block: unknown }[] = []
 const HEAD = 100n
 const HEAD_HASH: Hex = `0x${'aa'.repeat(32)}`
 const PINNED = { blockHash: HEAD_HASH, requireCanonical: true }
-
-const midnightReader = {
-  getPositionData: async (request: { marketId: Hex; parameters: { blockTag?: unknown } }) => {
-    pinned.push({ read: 'position', block: request.parameters.blockTag })
-    const market = chain.markets[request.marketId]!
-    return {
-      market: {
-        params: {
-          maturity: market.maturity,
-          loanToken: environment.LOAN_ASSET_ADDRESS,
-          collateralParams: market.collateralParams ?? []
-        },
-        tickSpacing: market.tickSpacing,
-        continuousFee: market.continuousFee,
-        lossFactor: market.lossFactor
-      },
-      accrueInterest: () => chain.positions[request.marketId]!
-    }
-  }
-}
 
 const fakeClient = {
   getBlock: async (request: { blockTag?: unknown }) => {
@@ -79,18 +67,31 @@ const fakeClient = {
   }) => {
     pinned.push({ read: 'consumed', block: request.blockTag })
     return request.contracts.map(contract => chain.consumed[contract.args[1] as string] ?? 0n)
-  },
-  extend: () => fakeClient,
-  morpho: { midnight: () => midnightReader }
+  }
 }
 
-vi.mock('viem', async importOriginal => ({
-  ...(await importOriginal<typeof import('viem')>()),
-  createPublicClient: () => fakeClient
-}))
-vi.mock('@morpho-org/morpho-sdk', async importOriginal => ({
-  ...(await importOriginal<typeof import('@morpho-org/morpho-sdk')>()),
-  morphoViemExtension: () => 'extension'
+vi.mock('../../../src/infrastructure/engine/market-lens.sol', () => ({
+  readMarketLens: async (
+    _client: unknown,
+    request: { marketIds: readonly Hex[]; blockHash: Hex }
+  ) => {
+    pinned.push({ read: 'position', block: blockTagAt(request.blockHash) })
+    return new Map(request.marketIds.map(id => [id, id]))
+  },
+  lensPosition: (_outputs: unknown, { marketId: id }: { marketId: Hex }): WorldPosition => {
+    const market = chain.markets[id]!
+    return {
+      marketId: id,
+      ...chain.positions[id]!,
+      lossFactor: market.lossFactor,
+      maturity: market.maturity,
+      tickSpacing: market.tickSpacing,
+      continuousFee: market.continuousFee,
+      params: marketParams,
+      withdrawable: 0n,
+      redeemableCredit: chain.positions[id]!.credit
+    }
+  }
 }))
 vi.mock('../../../src/infrastructure/provider/http-json.utils', () => ({
   requestJson: async (url: string) => {
@@ -321,7 +322,7 @@ const derived = async (
     readAt: 0,
     ownership: ownershipFor(config, setup),
     views: {},
-    reads: createWorldReads(config),
+    reads: createWorldReads(config, fakeClient as never),
     markets: [
       { strategy: 'ladder', marketId },
       { strategy: 'bootstrap', marketId }
@@ -673,14 +674,14 @@ describe('world derivations', () => {
   })
 })
 
-test('projects the loan-token collateral slot from the same SDK position and pinned world block', async () => {
+test('derives the debt ceiling from the loan-token collateral of one batched, pinned position read', async () => {
   const { ladder } = await derived(
     chain => {
-      chain.markets[marketId]!.collateralParams = [
-        { token: '0x1111111111111111111111111111111111111111', lltv: 500_000_000_000_000_000n },
-        { token: environment.LOAN_ASSET_ADDRESS as Address, lltv: 900_000_000_000_000_000n }
-      ]
-      chain.positions[marketId] = { credit: 1_200n, debt: 100n, collateral: [99_999n, 700n] }
+      chain.positions[marketId] = {
+        credit: 1_200n,
+        debt: 100n,
+        loanCollateral: { assets: 700n, lltv: 900_000_000_000_000_000n }
+      }
     },
     undefined,
     true
@@ -689,26 +690,5 @@ test('projects the loan-token collateral slot from the same SDK position and pin
     ok: true,
     value: { lowerRateCapacityAssets: 530n, debtAssets: 100n, debtCeilingAssets: 630n }
   })
-  expect(pinned.filter(read => read.read === 'position').map(read => read.block)).toEqual([
-    PINNED,
-    PINNED
-  ])
-})
-
-test('fails the world position closed when a listed collateral slot has no balance in the SDK reading', async () => {
-  const { ladder } = await derived(
-    chain => {
-      chain.markets[marketId]!.collateralParams = [
-        { token: environment.LOAN_ASSET_ADDRESS as Address, lltv: 1_000_000_000_000_000_000n }
-      ]
-      chain.positions[marketId] = { credit: 1_200n, debt: 100n, collateral: [] }
-    },
-    undefined,
-    true
-  )
-  expect(ladder.market).toEqual({
-    ok: false,
-    errorName: 'LadderAdapterError',
-    adapterOperation: 'position-unavailable'
-  })
+  expect(pinned.filter(read => read.read === 'position').map(read => read.block)).toEqual([PINNED])
 })

@@ -625,7 +625,7 @@ const Playground = () => {
           const marketId = nextMarketId(state, kind)
           const item =
             kind === 'bootstrap' ? createDefaultBootstrap(marketId) : createDefaultLadder(marketId)
-          form.pushFieldValue(kind, item as never)
+          form.pushFieldValue(kind, item)
           setUiIds(previous => ({ ...previous, [kind]: [...previous[kind], newId(kind)] }))
           setTimeout(
             () => document.getElementById(`${kind}-${state[kind].length}-marketId`)?.focus(),

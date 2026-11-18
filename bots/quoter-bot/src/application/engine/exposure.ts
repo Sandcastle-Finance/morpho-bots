@@ -98,7 +98,10 @@ const knownBuyGroups = (
     if (buys.length === 0) continue
     const previous = known.get(group.id)
     known.set(group.id, {
-      marketIds: addMarkets(previous?.marketIds, buys.map(offer => offer.marketId)),
+      marketIds: addMarkets(
+        previous?.marketIds,
+        buys.map(offer => offer.marketId)
+      ),
       buyTicks: [...(previous?.buyTicks ?? []), ...buys.map(offer => offer.tick)],
       cap: group.cap,
       indexed: true

@@ -18,6 +18,7 @@ import {
 } from '@morpho-org/midnight-sdk'
 import { getChainAddress } from '@morpho-org/morpho-ts'
 import { asStored } from '@repo/kernel/testing'
+import { readFileSync } from 'node:fs'
 import {
   bytesToHex,
   concat,
@@ -71,8 +72,8 @@ const offer = (
   buy: boolean,
   tick: bigint,
   extra: Record<string, unknown> = {}
-) =>
-  Offer.create({
+) => {
+  const params: Parameters<typeof Offer.create>[0] = {
     market,
     buy,
     maker: maker.address,
@@ -84,7 +85,9 @@ const offer = (
     continuousFeeCap: FEE_CAP,
     ...(buy ? {} : { reduceOnly: true, receiverIfMakerIsSeller: maker.address }),
     ...extra
-  } as Parameters<typeof Offer.create>[0])
+  }
+  return Offer.create(params)
+}
 
 /** A two-book ladder as the quoter builds it in per-book mode: one buy group, one reduce-only sell group. */
 const ladder = (ratifier: Address) => [
@@ -109,8 +112,11 @@ const typed = (tree: Tree): TypedPayload => {
 }
 
 const signed = async (tree: Tree) => {
-  const data = EcrecoverRatifierUtils.typedData({ tree, chainId: CHAIN })
-  const signature = await maker.signTypedData(data as Parameters<typeof maker.signTypedData>[0])
+  const data: Parameters<typeof maker.signTypedData>[0] = EcrecoverRatifierUtils.typedData({
+    tree,
+    chainId: CHAIN
+  })
+  const signature = await maker.signTypedData(data)
   const items = await EcrecoverRatifierUtils.ratify({ tree, account: maker.address, signature })
   return { signature, data: await Payload.encode(items) }
 }
@@ -123,6 +129,17 @@ const cancel = (group: Hex, amount = MAX_OFFER_CAP, onBehalf: Address = maker.ad
     abi: midnightAbi,
     functionName: 'setConsumed',
     args: [group, amount, onBehalf]
+  })
+const withdraw = ({
+  on = market,
+  units = 1_000n,
+  onBehalf = maker.address,
+  receiver = maker.address
+}: { on?: typeof market; units?: bigint; onBehalf?: Address; receiver?: Address } = {}) =>
+  encodeFunctionData({
+    abi: midnightAbi,
+    functionName: 'withdraw',
+    args: [on, units, onBehalf, receiver]
   })
 
 describe('the Midnight offers validator, against SDK-built quoter actions', () => {
@@ -253,6 +270,59 @@ describe('the Midnight offers validator, against SDK-built quoter actions', () =
     })
   })
 
+  it("reads a withdrawal of the maker's credit to the maker as committing nothing, and confirms it", () => {
+    const redemption = tx(MIDNIGHT, withdraw())
+    expect(read(redemption, undefined)).toEqual({
+      ok: true,
+      creates: [],
+      exposes: [],
+      carries: [],
+      retires: [],
+      consumes: {}
+    })
+    expect(validator.confirm(redemption, [])).toBe(true)
+  })
+
+  it('refuses a withdrawal naming its collaterals out of order, whose raw id is not the allowlisted one', () => {
+    const second = {
+      ...market.collateralParams[0]!,
+      token: '0x4200000000000000000000000000000000000007' as Address
+    }
+    const sorted = { ...market, collateralParams: [market.collateralParams[0]!, second] }
+    const twoCollaterals = midnightOffersValidator({
+      chainId: CHAIN,
+      maker: maker.address,
+      markets: [MarketUtils.toId(sorted)],
+      maxContinuousFeeCap: FEE_CAP
+    })
+    expect(twoCollaterals.read(tx(MIDNIGHT, withdraw({ on: sorted })), undefined, context).ok).toBe(
+      true
+    )
+    expect(
+      twoCollaterals.read(
+        tx(
+          MIDNIGHT,
+          withdraw({ on: { ...sorted, collateralParams: [second, market.collateralParams[0]!] } })
+        ),
+        undefined,
+        context
+      )
+    ).toEqual({
+      ok: false,
+      reason: 'withdraws from a market whose collaterals are not strictly ascending'
+    })
+  })
+
+  it('accepts ledgers recorded under version 2, which reads every recorded case as version 3 does', () => {
+    const recorded = JSON.parse(
+      readFileSync(new URL('readings/midnight-offers.json', import.meta.url), 'utf8')
+    ) as Record<string, Record<string, unknown>>
+    expect(validator.accepts).toEqual([2])
+    const v3 = recorded[`midnight-offers@${validator.version}`]!
+    for (const [name, reading] of Object.entries(recorded['midnight-offers@2']!))
+      expect(v3[name], name).toStrictEqual(reading)
+  })
+
   it('reads a cancel-only group as retiring nothing, and keeps the rest of the batch retiring', () => {
     const [a, b] = ladder(ECRECOVER).map(group => group.id)
     expect(
@@ -336,11 +406,12 @@ describe('the Midnight offers validator, against SDK-built quoter actions', () =
     const tree = Tree.create(entries)
 
     const alteredOffer = (change: Record<string, unknown>): [KernelPayload, unknown] => {
-      const struct = { ...OfferUtils.toStruct({ offer: offer(ECRECOVER, true, 100n) }), ...change }
-      const bad = new Offer(struct as ConstructorParameters<typeof Offer>[0])
-      const group = new Offer({ ...struct, group: GroupUtils.hash([bad]) } as ConstructorParameters<
-        typeof Offer
-      >[0])
+      const struct: ConstructorParameters<typeof Offer>[0] = {
+        ...OfferUtils.toStruct({ offer: offer(ECRECOVER, true, 100n) }),
+        ...change
+      }
+      const bad = new Offer(struct)
+      const group = new Offer({ ...struct, group: GroupUtils.hash([bad]) })
       return [typed(Tree.create([group])), [group]]
     }
 
@@ -607,6 +678,74 @@ describe('the Midnight offers validator, against SDK-built quoter actions', () =
         'an offer that names a callback',
         () => alteredOffer({ callback: OTHER }),
         'offer has a callback'
+      ],
+      [
+        'a withdrawal on behalf of another maker',
+        () => [tx(MIDNIGHT, withdraw({ onBehalf: OTHER })), undefined],
+        'withdraws on behalf of another maker'
+      ],
+      [
+        'a withdrawal to another receiver',
+        () => [tx(MIDNIGHT, withdraw({ receiver: OTHER })), undefined],
+        'withdraws to a receiver other than the maker'
+      ],
+      [
+        'a withdrawal from a market on another chain',
+        () => [tx(MIDNIGHT, withdraw({ on: { ...market, chainId: 1n } })), undefined],
+        'withdraws from a market on another chain'
+      ],
+      [
+        'a withdrawal from a market on another Midnight',
+        () => [tx(MIDNIGHT, withdraw({ on: { ...market, midnight: OTHER } })), undefined],
+        'withdraws from a market on another Midnight'
+      ],
+      [
+        'a withdrawal from a market not allowlisted',
+        () => [
+          tx(MIDNIGHT, withdraw({ on: { ...market, maturity: market.maturity + 1n } })),
+          undefined
+        ],
+        'market not allowlisted'
+      ],
+      [
+        'a withdrawal of zero units',
+        () => [tx(MIDNIGHT, withdraw({ units: 0n })), undefined],
+        'withdraws nothing'
+      ],
+      [
+        'a withdrawal with value attached',
+        () => [{ ...tx(MIDNIGHT, withdraw()), value: 1n }, undefined],
+        'nonzero value'
+      ],
+      [
+        'a withdrawal inside a multicall',
+        () => [
+          tx(
+            MIDNIGHT,
+            encodeFunctionData({
+              abi: midnightAbi,
+              functionName: 'multicall',
+              args: [[withdraw()]]
+            })
+          ),
+          undefined
+        ],
+        'multicall: only setConsumed cancels'
+      ],
+      [
+        'a withdrawal with trailing calldata',
+        () => [tx(MIDNIGHT, concat([withdraw(), '0x00'])), undefined],
+        'only setConsumed cancels'
+      ],
+      [
+        'a withdrawal to a target other than Midnight',
+        () => [tx(OTHER, withdraw()), undefined],
+        'unrecognized target'
+      ],
+      [
+        'a withdrawal carrying a witness',
+        () => [tx(MIDNIGHT, withdraw()), entries],
+        'a redemption takes no witness'
       ]
     ]
 
@@ -700,6 +839,7 @@ describe('the Midnight offers validator, against SDK-built quoter actions', () =
             setterEntries
           ),
           'a cancellation': at(tx(MIDNIGHT, cancel(a!))),
+          'a redemption': at(tx(MIDNIGHT, withdraw())),
           'a batch of cancellations': at(
             tx(
               MIDNIGHT,

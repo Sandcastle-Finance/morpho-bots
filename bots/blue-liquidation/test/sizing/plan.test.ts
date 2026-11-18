@@ -4,15 +4,7 @@ import type { PlanInput } from '../../src/sizing/plan'
 
 import { ORACLE_PRICE_SCALE, WAD } from '../../src/constants'
 import { lifFromLltv } from '../../src/sizing/lif'
-import {
-  mulDivDown,
-  toAssetsDown,
-  toSharesUp,
-  wDivUp,
-  wMulDown,
-  mulDivUp,
-  toAssetsUp
-} from '../../src/sizing/math'
+import { mulDivDown, toSharesUp, wDivUp, mulDivUp, toAssetsUp } from '../../src/sizing/math'
 import { plan, planWithReason } from '../../src/sizing/plan'
 
 const LLTV = 86n * 10n ** 16n // 0.86e18
@@ -45,17 +37,6 @@ function contractRepaidShares(input: PlanInput, seizedAssets: bigint): bigint {
   )
 }
 
-// plan()'s own full-debt seize target (debt-binds branch value), recomputed here to assert branch wiring.
-function seizeForFullDebt(input: PlanInput): bigint {
-  const lif = lifFromLltv(input.lltv)
-  const repaidAssetsFull = toAssetsDown(
-    input.borrowShares,
-    input.accruedTotalBorrowAssets,
-    input.totalBorrowShares
-  )
-  return mulDivDown(wMulDown(repaidAssetsFull, lif), ORACLE_PRICE_SCALE, input.collateralPrice)
-}
-
 describe('plan — skip cases', () => {
   it.each([
     [{ hasDebt: false }, 'no_debt'],
@@ -84,15 +65,11 @@ describe('plan — branch selection', () => {
     const input = baseInput({ collateral: 100_000n * WAD })
     const result = plan(input)
     expect(result).not.toBeNull()
-    expect(result!.seizedAssets).toBe(seizeForFullDebt(input))
-    expect(result!.seizedAssets).toBeLessThan(input.collateral)
+    expect(result!.seizedAssets).toBe(1_043_841_336_116_910_229_000n)
   })
 
   it('collateral binds: seizes 100% of collateral when underwater', () => {
-    const input = baseInput({ collateral: 100n * WAD })
-    // Sanity: the full-debt seize would exceed the collateral.
-    expect(seizeForFullDebt(input)).toBeGreaterThan(input.collateral)
-    const result = plan(input)
+    const result = plan(baseInput({ collateral: 100n * WAD }))
     expect(result!.seizedAssets).toBe(100n * WAD)
   })
 })

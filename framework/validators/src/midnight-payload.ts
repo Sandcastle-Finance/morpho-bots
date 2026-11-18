@@ -1,7 +1,7 @@
 import type { Hex } from 'viem'
 
 import { midnightAbi, Offer, Payload } from '@morpho-org/midnight-sdk'
-import { gunzipSync, type ZlibOptions } from 'node:zlib'
+import { gunzipSync } from 'node:zlib'
 import { bytesToHex, decodeAbiParameters, encodeAbiParameters, hexToBytes } from 'viem'
 
 const HEADER_BYTES = 5
@@ -11,7 +11,7 @@ const gunzipWhole = (compressed: Uint8Array) =>
   gunzipSync(compressed, {
     info: true,
     maxOutputLength: Payload.MAX_DECOMPRESSED_ITEMS_BYTES
-  } as ZlibOptions) as unknown as { buffer: Buffer; engine: { bytesWritten: number } }
+  }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } }
 
 const offerComponents = (() => {
   const take = midnightAbi.find(item => item.type === 'function' && item.name === 'take')

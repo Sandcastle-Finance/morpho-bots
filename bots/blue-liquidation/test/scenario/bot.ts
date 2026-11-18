@@ -1,24 +1,29 @@
 import type { BackoffPolicy } from '@repo/controller'
 import type { Budget, RunnerOptions } from '@repo/engine'
-import type { KernelConfig, TxPayload } from '@repo/kernel'
+import type { TxPayload } from '@repo/kernel'
 import type { Logger } from '@repo/kit'
 import type { SwapPlan } from '@repo/swaps'
 import type { Address, Hex } from 'viem'
 
 import { Executor, MorphoAbi } from '@repo/contracts'
+import { createReplayer } from '@repo/engine/replay'
 import { FakeChain, MemoryStore } from '@repo/kernel/testing'
-import { transactionKernelConfig } from '@repo/kit'
+import { createJournalFileSink, readJournalFile } from '@repo/kit'
 import { lensKey } from '@repo/utils'
-import { executorLiquidationValidator } from '@repo/validators'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { decodeFunctionData, getAddress, pad } from 'viem'
-import { base } from 'viem/chains'
+import { decodeFunctionData, getAddress, isAddressEqual, pad } from 'viem'
 
 import type { MarketParams } from '../../src/market'
+import type { LiquidatorSettings } from '../../src/settings'
 import type { LensOut } from '../../src/state/lens.sol'
 
-import { encodeLiquidationExec } from '../../src/execution/encode-call'
+import { describeFailure } from '../../src/failure'
+import { LIQUIDATOR_GRAPH } from '../../src/graph'
 import { marketId } from '../../src/market'
+import { replayGraph } from '../../src/replay'
 import { startLiquidator } from '../../src/run'
 import { createTickStats } from '../../src/stats'
 
@@ -28,7 +33,8 @@ const ACCOUNT = getAddress('0x4444444444444444444444444444444444444444')
 const LOAN = getAddress('0x6666666666666666666666666666666666666666')
 const COLLATERAL = getAddress('0x7777777777777777777777777777777777777777')
 const BLOCK_MS = 40
-const MAX_SPEND_WEI = 10n ** 16n
+const JOURNAL_CAPACITY_BYTES = 10_000_000
+const JOURNAL_RUN_CAP_BYTES = 2 ** 40
 
 export const market: MarketParams = {
   loanToken: LOAN,
@@ -63,8 +69,8 @@ const unhealthyAt = (block: bigint, liquidations: number, cut: bigint): LensOut 
 
 const swap: SwapPlan = { steps: [], expectedAmountOut: 10n ** 18n, amountOutMinimum: 1n }
 
-const borrowerOf = (payload: TxPayload): Address | undefined => {
-  if (payload.to !== EXECUTOR) return undefined
+const borrowerOf = (payload: TxPayload, executor: Address): Address | undefined => {
+  if (!isAddressEqual(payload.to as Address, executor)) return undefined
   const exec = decodeFunctionData({ abi: Executor.abi, data: payload.data as Hex })
   const [first] = (exec.args as readonly [readonly Hex[]])[0]
   const call = decodeFunctionData({ abi: Executor.abi, data: first! })
@@ -78,29 +84,39 @@ const borrowerOf = (payload: TxPayload): Address | undefined => {
 type Line = Readonly<{ event: string; fields: Record<string, unknown> }>
 
 /** Records every line, and throws on the event `failsOn` names, as a broken log transport would. */
-const recordingLogger = (lines: Line[], failsOn: () => string | undefined): Logger => {
+const recordingLogger = (
+  lines: Line[],
+  failure: () => Readonly<{ on: string | undefined; error: Error | undefined }>
+): Logger => {
   const log = (event: string, fields: Record<string, unknown> = {}) => {
-    if (event === failsOn()) throw new Error(`the logger failed on ${event}`)
+    const { on, error } = failure()
+    if (event === on) throw error ?? new Error(`the logger failed on ${event}`)
     lines.push({ event, fields })
   }
   return { debug: log, info: log, warn: log, error: log }
 }
 
-export const kernelConfig = (reservations: number): KernelConfig => {
-  const config = transactionKernelConfig(
-    {
-      chainId: 8453,
-      targets: [EXECUTOR],
-      maxSpendWei: MAX_SPEND_WEI,
-      stuckMs: 10_000,
-      maxEvidenceAgeBlocks: 64
-    },
-    base,
-    ACCOUNT,
-    executorLiquidationValidator({ executor: EXECUTOR, protocol: { kind: 'blue', morpho: MORPHO } })
-  )
-  return { ...config, caps: { native: BigInt(reservations) * MAX_SPEND_WEI } }
-}
+/** A Base liquidator's settings, as a live run would record them, for the fake chain's accounts. */
+export const testSettings = (): LiquidatorSettings => ({
+  runId: 'run',
+  chainId: 8453,
+  account: ACCOUNT,
+  executor: EXECUTOR,
+  morpho: MORPHO,
+  kernel: {
+    maxFeePerGasWei: 10n ** 9n,
+    maxSpendWei: 10n ** 16n,
+    maxGasLimit: 10n ** 7n,
+    finality: 'safe',
+    enrollment: 'enrolling'
+  },
+  worldValidMs: 60_000,
+  quotes: { validForMs: 60_000, retryMs: 1_000 },
+  venue: { concurrency: 4 },
+  simulations: 4,
+  maxReservations: 4,
+  backoff: { baseBlocks: 1, maxBlocks: 4 }
+})
 
 export const until = async (done: () => boolean, what: string, ms = 20_000) => {
   const deadline = Date.now() + ms
@@ -110,23 +126,54 @@ export const until = async (done: () => boolean, what: string, ms = 20_000) => {
   }
 }
 
-const discardingJournal = {
-  sink: { append: async () => {}, finalize: async () => {} },
-  capacityBytes: 1_000_000
+/** Journals through the real file sink, under the run id and settings a live run would record. */
+const fileJournal = async (settings: LiquidatorSettings) => {
+  const directory = await mkdtemp(join(tmpdir(), 'blue-journal-'))
+  const created = await createJournalFileSink({
+    directory,
+    graph: LIQUIDATOR_GRAPH,
+    build: { revision: '0d58dd8e5', imageTag: 'test' },
+    capacityBytes: JOURNAL_CAPACITY_BYTES,
+    runCapBytes: JOURNAL_RUN_CAP_BYTES,
+    runId: settings.runId,
+    settings,
+    describe: describeFailure
+  })
+  return { path: created.path, directory, journal: created.journal }
+}
+
+/** Rebuilds the graph from the file's header alone, and fails unless the file ended clean and every step replays exactly. */
+export const replayFile = async (path: string) => {
+  let replayer: ReturnType<typeof createReplayer> | undefined
+  let steps = 0
+  for await (const read of readJournalFile(path)) {
+    if (read.kind === 'header') replayer = createReplayer(replayGraph(read.header))
+    else if (read.kind === 'entry') {
+      const replayed = replayer!.apply(read.entry)
+      if (replayed.kind === 'diverged')
+        throw new Error(`the journal diverged at line ${read.line}: ${replayed.reason}`)
+      if (replayed.kind === 'step') steps += 1
+    } else if (read.status !== 'clean' || !replayer)
+      throw new Error(`the journal file is unreadable: ${read.status}`)
+  }
+  return steps
 }
 
 /**
  * The liquidator against a fake chain: `alive` are the positions the world reads as liquidatable,
  * and a mined liquidation clears its position unless `squeeze` says the shared route is spent or
- * `survives` says it stays liquidatable.
+ * `survives` says it stays liquidatable. It journals to a file unless given a `journal`, and its
+ * `shutdown` replays that file.
  */
 export const startBot = async (
   parameters: {
     chain?: FakeChain
     store?: MemoryStore
     alive?: Set<Address>
+    /** Replaces {@link testSettings}, before the overrides below. */
+    settings?: LiquidatorSettings
+    chainId?: number
     enrollment?: 'enrolling' | 'enrolled'
-    reservations?: number
     runId?: string
     /** Whether a liquidation mined at this index of its block reverts. */
     squeeze?: (indexInBlock: number) => boolean
@@ -139,18 +186,26 @@ export const startBot = async (
     journal?: NonNullable<RunnerOptions['journal']>
     /** Firm quotes the venue starts per window, when it is rate limited. */
     venueBudget?: Budget
-    /** The kernel's block windows, when not the default small ones. */
-    windows?: Readonly<{
-      maxSimLagBlocks: number
-      maxEvidenceAgeBlocks: number
-      reorgDepth: number
-    }>
+    /** How many blocks below the head the kernel keeps, when not the default few. */
+    reorgDepth?: number
   } = {}
 ) => {
   const chain = parameters.chain ?? new FakeChain()
   const store = parameters.store ?? new MemoryStore()
   const alive = parameters.alive ?? new Set<Address>()
-  const reservations = parameters.reservations ?? 4
+  const base = parameters.settings ?? testSettings()
+  const settings: LiquidatorSettings = {
+    ...base,
+    ...(parameters.chainId !== undefined && { chainId: parameters.chainId }),
+    ...(parameters.runId !== undefined && { runId: parameters.runId }),
+    ...(parameters.worldValidMs !== undefined && { worldValidMs: parameters.worldValidMs }),
+    ...(parameters.backoff && { backoff: parameters.backoff }),
+    ...(parameters.venueBudget && {
+      venue: { ...base.venue, budget: parameters.venueBudget }
+    }),
+    kernel: { ...base.kernel, enrollment: parameters.enrollment ?? base.kernel.enrollment }
+  }
+  const file = parameters.journal ? undefined : await fileJournal(settings)
   const lines: Line[] = []
   const world: {
     discoverFails: boolean
@@ -165,6 +220,8 @@ export const startBot = async (
     /** How many quotes the venue was asked for. */
     quotes: number
     logFailsOn?: string
+    /** What the logger throws on `logFailsOn`. */
+    logError?: Error
     /** How long a lens read takes to answer. */
     readDelayMs: number
   } = {
@@ -178,7 +235,7 @@ export const startBot = async (
   const liquidated = new Map<Address, number>()
   const minedInBlock = new Map<number, number>()
   chain.onMined = (payload, block) => {
-    const borrower = borrowerOf(payload)
+    const borrower = borrowerOf(payload, settings.executor)
     if (!borrower) return 'success'
     const index = minedInBlock.get(block) ?? 0
     minedInBlock.set(block, index + 1)
@@ -189,23 +246,15 @@ export const startBot = async (
     else alive.delete(borrower)
     return 'success'
   }
-  const bot = await startLiquidator({
-    journal: parameters.journal ?? discardingJournal,
+  const bot = await startLiquidator(settings, {
+    journal: parameters.journal ?? file!.journal,
     kernel: {
-      config: {
-        ...kernelConfig(reservations),
-        ...(parameters.windows && {
-          maxSimLagBlocks: parameters.windows.maxSimLagBlocks,
-          maxEvidenceAgeBlocks: parameters.windows.maxEvidenceAgeBlocks
-        })
-      },
       store,
       chain,
       effects: chain.effects,
-      enrollment: parameters.enrollment ?? 'enrolling',
       pollMs: 5,
       effectTimeoutMs: 1_000,
-      reorgDepth: parameters.windows?.reorgDepth ?? 16,
+      reorgDepth: parameters.reorgDepth ?? 16,
       onError: () => {}
     },
     world: {
@@ -236,42 +285,19 @@ export const startBot = async (
         )
       }
     },
-    worldValidMs: parameters.worldValidMs ?? 60_000,
-    quotes: {
-      quoteFor: async () => {
-        world.quotes += 1
-        await world.quoteHeld
-        if (world.quoteFails) throw new Error('the venue is down')
-        return { kind: 'swap', plan: swap }
-      },
-      validForMs: 60_000,
-      retryMs: 1_000
+    quoteFor: async () => {
+      world.quotes += 1
+      await world.quoteHeld
+      if (world.quoteFails) throw new Error('the venue is down')
+      return { kind: 'swap', plan: swap }
     },
-    prepare: {
-      executor: EXECUTOR,
-      encode: (marketArg, borrower, seizedAssets, swapPlan) =>
-        encodeLiquidationExec({
-          executor: EXECUTOR,
-          morpho: MORPHO,
-          market: marketArg,
-          seizedAssets,
-          borrower,
-          plan: swapPlan,
-          recipient: ACCOUNT
-        }),
-      simulate: async () => {
-        await world.simulateHeld
-        if (world.simulateThrows) throw new Error('the node is down')
-        return { status: 'ok' }
-      }
+    simulate: async () => {
+      await world.simulateHeld
+      if (world.simulateThrows) throw new Error('the node is down')
+      return { status: 'ok' }
     },
-    venue: { concurrency: 4, ...(parameters.venueBudget && { budget: parameters.venueBudget }) },
-    simulations: 4,
-    backoff: parameters.backoff ?? { baseBlocks: 1, maxBlocks: 4 },
-    runId: parameters.runId ?? 'run',
-    maxReservations: reservations,
     stats: createTickStats(),
-    logger: recordingLogger(lines, () => world.logFailsOn),
+    logger: recordingLogger(lines, () => ({ on: world.logFailsOn, error: world.logError })),
     ...(parameters.now && { now: parameters.now })
   })
   const state = () => bot.runner.read(bot.nodes.kernel.nodes.state)!
@@ -289,10 +315,18 @@ export const startBot = async (
     world,
     state,
     mining,
+    settings,
+    journalPath: file?.path,
     events: (event: string) => lines.filter(line => line.event === event),
     shutdown: async () => {
       mining(false)
       await bot.runner.abandon()
+      if (!file) return undefined
+      try {
+        return await replayFile(file.path)
+      } finally {
+        await rm(file.directory, { recursive: true, force: true })
+      }
     }
   }
 }

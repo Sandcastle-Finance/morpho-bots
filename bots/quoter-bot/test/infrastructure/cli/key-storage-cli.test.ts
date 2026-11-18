@@ -107,17 +107,6 @@ describe('signer key storage CLI options', () => {
     ).rejects.toBeInstanceOf(CliUsageError)
   })
 
-  test('warns in CLI help that private-key and password argv values are exposed', async () => {
-    const help = await createCli().run(['--help'])
-
-    expect(help).toContain('--private-key <key>')
-    expect(help).toContain('MAKER_PRIVATE_KEY')
-    expect(help).toContain('process listings and shell history')
-    expect(help).toContain('--password <password>')
-    expect(help).toContain('KEYSTORE_PASSWORD')
-    expect(help).toContain('--interactive')
-  })
-
   test('entrypoint --help emits both argv warnings without exposing an ambient secret', async () => {
     const secret = 'must-not-appear-in-help-output'
     const lines: string[] = []

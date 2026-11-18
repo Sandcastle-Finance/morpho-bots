@@ -40,10 +40,7 @@ try {
 }
 const version = assertPublishableVersion(workspaceManifest.version)
 const bundle = assertBinBundle(
-  readRequired(
-    BUNDLE_PATH,
-    'bundle missing; run `pnpm --filter @morpho-org/quoter-bot run build` first'
-  )
+  readRequired(BUNDLE_PATH, 'bundle missing; run `bun run --cwd bots/quoter-bot build` first')
 )
 const license = readRequired(join(REPO_ROOT, 'LICENSE'), 'repository LICENSE file is missing')
 const readme = readRequired(

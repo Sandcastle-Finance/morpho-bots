@@ -43,6 +43,17 @@ export class FinalityBeyondWindowError extends Error {
   }
 }
 
+/** A kernel setting is missing or out of range. The message names the setting, never its value. */
+export class InvalidKernelSettingError extends Error {
+  constructor(
+    readonly setting: string,
+    requirement: string
+  ) {
+    super(`${setting} ${requirement}`)
+    this.name = 'InvalidKernelSettingError'
+  }
+}
+
 /** The kernel's signing guard refused: what the signature would authorize no longer holds. */
 export class SignWithdrawnError extends Error {
   constructor() {

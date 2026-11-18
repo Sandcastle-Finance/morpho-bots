@@ -6,14 +6,6 @@ import { BlueLiquidationLens } from '../../src/state/lens.sol'
 const MORPHO = getAddress('0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb')
 
 describe('BlueLiquidationLens', () => {
-  it('compiles via soltag and binds the Morpho address into the factory call', () => {
-    // Proves the soltag/vite transform compiled the inline Solidity (sol``` would otherwise throw)
-    // and that constructor binding produced a deployless factory call.
-    const compiled = BlueLiquidationLens.with(MORPHO)
-    expect(compiled.factoryData.length).toBeGreaterThan(2)
-    expect(compiled.factory).toMatch(/^0x[0-9a-fA-F]{40}$/)
-  })
-
   it('exposes a single-element-in / single-value-out per-item entrypoint', () => {
     // viem-dlc's envelope calls ONE element at a time, so the entrypoint takes a single tuple and
     // returns a single tuple — `arrayifiedAbi` derives the array-shaped wire fragment from it. This

@@ -1,8 +1,24 @@
+import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 
 const readChartFile = (path: string) =>
   readFile(new URL(`../../helm/quoter-bot/${path}`, import.meta.url), 'utf8')
+
+const renderStatefulSet = async (...extra: string[]) => {
+  const chartPath = fileURLToPath(new URL('../../helm/quoter-bot/', import.meta.url))
+  const { stdout } = await promisify(execFile)('helm', [
+    'template',
+    'quoter-bot',
+    chartPath,
+    '--show-only',
+    'templates/statefulset.yaml',
+    ...extra
+  ])
+  return stdout
+}
 
 describe('quoter-bot Helm chart', () => {
   it('mounts the config file under a directory that exists in the image', async () => {
@@ -28,13 +44,28 @@ describe('quoter-bot Helm chart', () => {
     ])
 
     expect(statefulSet).toContain('kind: StatefulSet')
-    expect(statefulSet).toContain('replicas: 1')
     expect(statefulSet).toContain('serviceName: {{ include "quoter-bot.fullname" . | quote }}')
     expect(statefulSet).not.toContain('kind: Deployment')
     expect(statefulSet).not.toContain('type: Recreate')
     expect(service).toContain('clusterIP: None')
     expect(service).not.toContain('ports:')
   })
+
+  it('renders replicas 0 or 1 and rejects anything else', async () => {
+    await expect(renderStatefulSet()).resolves.toContain('  replicas: 1\n')
+    await expect(renderStatefulSet('--set-string', 'replicas=0')).resolves.toContain(
+      '  replicas: 0\n'
+    )
+    for (const flag of [
+      ['--set', 'replicas=2'],
+      ['--set-string', 'replicas=3e0'],
+      ['--set-string', 'replicas=1.0']
+    ]) {
+      await expect(renderStatefulSet(...flag)).rejects.toThrow(
+        'quoter-bot: replicas must be 0 or 1'
+      )
+    }
+  }, 30_000)
 
   it('derives the grace floor from the configured group counts', async () => {
     const [statefulSet, values] = await Promise.all([

@@ -1,8 +1,8 @@
-import type { Finality, LogLevel } from '@repo/kit'
+import type { KernelSettings, LogLevel } from '@repo/kit'
 import type { Address, Chain, Hex } from 'viem'
 
-import { parseFinality } from '@repo/kit'
-import { getAddress, isAddress, isHex, parseGwei } from 'viem'
+import { parseKernelSettings } from '@repo/kit'
+import { getAddress, isAddress, isHex } from 'viem'
 import { base, mainnet } from 'viem/chains'
 
 import { InvalidConfigError } from './errors'
@@ -40,14 +40,8 @@ const DEFAULT_MIN_UTILIZATION_DELTA_BIPS = 250
 
 type Env = Record<string, string | undefined>
 
-export type KernelStoreConfig = {
-  stateDirectory: string
-  enrollment: 'enrolling' | 'enrolled'
-}
-
 export type Config = {
   chainId: number
-  finality: Finality
   chain: Chain
   rpcUrl: string
   rpcUrlFallback: string | undefined
@@ -63,9 +57,8 @@ export type Config = {
   allowIdleReallocation: boolean
   /** Read, plan, and simulate as normal, but never submit — the operator ramp-up mode. */
   dryRun: boolean
-  /** Where the kernel keeps the account's ledger. */
-  kernel: KernelStoreConfig
-  maxFeePerGasWei: bigint
+  /** Spend bounds are the policy's default gas ceiling priced at `MAX_FEE_GWEI`. */
+  kernel: KernelSettings
   logLevel: LogLevel
 }
 
@@ -137,21 +130,6 @@ const addressListEnv = (env: Env, name: string): Address[] => {
   return [...new Set(addresses)]
 }
 
-/**
- * `KERNEL_STATE_DIR` holds the kernel's ledger and must survive a restart. `KERNEL_ENROLLMENT` is
- * `enrolling` for the first start of a fresh account and `enrolled` for every later one.
- */
-const kernelConfig = (env: Env): KernelStoreConfig => {
-  const stateDirectory = required(env, 'KERNEL_STATE_DIR')
-  const enrollment = required(env, 'KERNEL_ENROLLMENT')
-  if (enrollment !== 'enrolling' && enrollment !== 'enrolled') {
-    throw new InvalidConfigError(
-      `KERNEL_ENROLLMENT must be "enrolling" or "enrolled", got: ${env.KERNEL_ENROLLMENT}`
-    )
-  }
-  return { stateDirectory, enrollment }
-}
-
 const isLogLevel = (value: string): value is LogLevel =>
   (LOG_LEVELS as readonly string[]).includes(value)
 
@@ -178,14 +156,6 @@ export const loadConfig = (env: Env = process.env): Config => {
       `Unsupported CHAIN_ID ${chainId}; supported chain ids: ${Object.keys(CHAIN_MAP).join(', ')}`
     )
   }
-  const finalityName = `FINALITY_${chainId}`
-  const finality = parseFinality(required(env, finalityName).trim())
-  if (finality === undefined) {
-    throw new InvalidConfigError(
-      `${finalityName} must be safe, finalized, or a positive block depth, got: ${env[finalityName]}`
-    )
-  }
-
   const rpcUrl = required(env, 'RPC_URL')
 
   const reallocatorPrivateKey = required(env, 'REALLOCATOR_PRIVATE_KEY')
@@ -210,14 +180,8 @@ export const loadConfig = (env: Env = process.env): Config => {
     )
   }
 
-  const maxFeeGwei = required(env, 'MAX_FEE_GWEI')
-  if (!/^\d+(\.\d+)?$/.test(maxFeeGwei) || Number(maxFeeGwei) <= 0) {
-    throw new InvalidConfigError(`MAX_FEE_GWEI must be a positive number, got: ${env.MAX_FEE_GWEI}`)
-  }
-
   return {
     chainId,
-    finality,
     chain,
     rpcUrl,
     rpcUrlFallback: env.RPC_URL_FALLBACK?.trim() || undefined,
@@ -239,8 +203,7 @@ export const loadConfig = (env: Env = process.env): Config => {
     ),
     allowIdleReallocation: boolEnv(env, 'ALLOW_IDLE_REALLOCATION', true),
     dryRun: boolEnv(env, 'DRY_RUN', false),
-    kernel: kernelConfig(env),
-    maxFeePerGasWei: parseGwei(maxFeeGwei),
+    kernel: parseKernelSettings(env, chain, { spendBounds: 'fee-cap' }),
     logLevel
   }
 }

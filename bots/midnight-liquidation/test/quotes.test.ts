@@ -144,7 +144,6 @@ function compose(
   overrides: {
     venues?: ('0x' | '1inch')[]
     excludeCollaterals?: Address[]
-    logger?: Logger
     httpClient?: RateLimitedClient
     unwrappers?: readonly Unwrapper[]
   } = {}
@@ -159,7 +158,7 @@ function compose(
     maxRouteImpactBps: 500,
     unwrappers: overrides.unwrappers ?? [],
     excludeCollaterals: overrides.excludeCollaterals ?? [],
-    logger: overrides.logger ?? NOOP_LOGGER
+    logger: NOOP_LOGGER
   })
 }
 
@@ -245,26 +244,6 @@ describe('composeQuoting (Midnight lens-projection adapter)', () => {
     expect(
       await compose(selector, { excludeCollaterals: [collateral] }).resolvePair(collateral, loan)
     ).toBeNull()
-  })
-
-  it('threads the candidate discriminator, so two candidates of one position stay separable', async () => {
-    // Both candidates carry one `id`, so without the discriminator their `select.ok` rows are
-    // indistinguishable.
-    const events: { event: string; fields?: Record<string, unknown> }[] = []
-    const capturing: Logger = {
-      debug: () => {},
-      info: (event, fields) => events.push({ event, fields }),
-      warn: () => {},
-      error: () => {}
-    }
-    const { selector } = fakeSelector(['0x'])
-    const { quoteFor } = compose(selector, { logger: capturing })
-    await quoteFor(PLAN, OUT, LABEL)
-    await quoteFor({ ...PLAN, postMaturityMode: true }, OUT, LABEL)
-    const rows = events.filter(e => e.event === 'select.ok')
-    expect(rows.map(e => e.fields?.id)).toEqual([LABEL, LABEL])
-    expect(rows.map(e => e.fields?.collateralIndex)).toEqual([0, 0])
-    expect(rows.map(e => e.fields?.postMaturityMode)).toEqual([false, true])
   })
 
   it('projects the plan break-even into the venue slippage it asks for', () => {

@@ -1,4 +1,4 @@
-import type { Account, Address, Chain, Hex, LocalAccount, Transport } from 'viem'
+import type { Account, Address, Chain, Hex, LocalAccount } from 'viem'
 
 import { BaseError, createWalletClient, isAddressEqual, keccak256, RpcError } from 'viem'
 import { getBlock, prepareTransactionRequest, sendRawTransaction } from 'viem/actions'
@@ -84,7 +84,7 @@ export function createAccountSigner(options: {
     ? createWalletClient({
         account,
         chain: options.chain,
-        transport: createHttpTransport(options.rpcUrl) as Transport
+        transport: createHttpTransport(options.rpcUrl)
       })
     : client
 
@@ -101,7 +101,7 @@ export function createAccountSigner(options: {
       ...(req.gas === undefined ? {} : { gas: req.gas })
     })
     // A node's `eth_fillTransaction` answer can replace a zero or missing fee, or add a gasPrice:
-    // https://github.com/wevm/viem/blob/viem%402.47.17/src/actions/public/fillTransaction.ts
+    // https://github.com/wevm/viem/blob/viem%402.57.19/src/actions/public/fillTransaction.ts
     if (request.gas === undefined)
       throw new PreparedTransactionError('the prepared transaction has no gas limit')
     const asRequested =

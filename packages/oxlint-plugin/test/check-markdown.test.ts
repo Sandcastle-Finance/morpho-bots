@@ -49,7 +49,8 @@ describe('markdownFindings', () => {
       '## Running with Docker Compose on Base',
       '### 1. Assess the Vault',
       '### Step 2: Draft a plan',
-      '## ADR-2026-05-28: The Executor is generic'
+      '## ADR-2026-05-28: The Executor is generic',
+      '## 2026-11-03 — December up 50 bps and November down 50'
     ].join('\n')
 
     expect(markdownFindings(source)).toStrictEqual([

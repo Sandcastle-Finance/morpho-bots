@@ -101,7 +101,7 @@ export const kernelOnlySigning: Rule = {
       },
       ExportNamedDeclaration(node) {
         if (
-          !onlyTypes(node.exportKind, node.specifiers as never) &&
+          !onlyTypes(node.exportKind, node.specifiers) &&
           node.source &&
           isSigningModule(node.source.value)
         )

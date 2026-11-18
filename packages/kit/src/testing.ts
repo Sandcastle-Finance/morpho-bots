@@ -1,3 +1,4 @@
+import type { JournalEntry, Stamp } from '@repo/engine'
 import type { KernelActivity, Notice, Refusal } from '@repo/kernel'
 
 import type { Logger } from './logger'
@@ -20,6 +21,63 @@ export const recordLogs = () => {
   }
   return { lines, logger }
 }
+
+type LiveLine = Readonly<{ event: string; fields: Record<string, unknown> }>
+type GraphNode = Readonly<{ id: string; by: string; shape: string }>
+type LiveGraph = Readonly<{
+  format: number
+  nodes: GraphNode[]
+  operators: Readonly<{ id: string; reads: { node: string; mode: string }[]; emits?: string[] }>[]
+  effects: Readonly<{ id: string; requests: string[]; samples: string[]; results?: string }>[]
+}>
+/** A step as a reader rebuilds it: its stamp, and the nodes it wrote in the order written. */
+export type WrittenStep = Stamp & Readonly<{ nodes: readonly string[] }>
+
+/** The last whole `live.graph` in `lines`, its parts joined in order. */
+export const liveGraph = (lines: readonly LiveLine[]) => {
+  const parts = lines.filter(line => line.event === 'live.graph').map(line => line.fields)
+  const last = parts.findLast(part => part.last === true)
+  if (!last) return undefined
+  const joined: LiveGraph = { format: last.format as number, nodes: [], operators: [], effects: [] }
+  for (const part of parts.filter(part => part.graph === last.graph)) {
+    joined.nodes.push(...(part.nodes as LiveGraph['nodes']))
+    joined.operators.push(...(part.operators as LiveGraph['operators']))
+    joined.effects.push(...(part.effects as LiveGraph['effects']))
+  }
+  return joined
+}
+
+/** Every step `live.flow` lines name, each node by the id `graph` gives its index. */
+export const liveSteps = (lines: readonly LiveLine[], graph = liveGraph(lines)) =>
+  lines
+    .filter(line => line.event === 'live.flow')
+    .flatMap(({ fields }) => {
+      let at = fields.t0 as number
+      return (fields.steps as [number, number[], ...(number | string)[]][]).flatMap(
+        ([seq, deltas, ...nodes]) =>
+          deltas.map((delta, offset): WrittenStep => {
+            at += delta
+            return {
+              seq: seq + offset,
+              at,
+              nodes: nodes.map(node => (typeof node === 'number' ? graph!.nodes[node]!.id : node))
+            }
+          })
+      )
+    })
+
+/** Every step a journal holds, with the nodes its writes and derived writes name, as observed. */
+export const journaledSteps = (entries: readonly JournalEntry[]) =>
+  entries.flatMap((entry): WrittenStep[] =>
+    entry.kind === 'step'
+      ? [
+          {
+            ...entry.stamp,
+            nodes: [...new Set([...entry.writes, ...entry.derived].map(write => write.node))]
+          }
+        ]
+      : []
+  )
 
 export const TX_KEY = '0xmarket:0xborrower'
 const intent = (n: number) => `${TX_KEY}#run.${n}`

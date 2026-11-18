@@ -74,21 +74,29 @@ const STALE_EVIDENCE: ReadonlySet<RefusalCode> = new Set([
 export const isStaleRefusal = (activity: KernelActivity | undefined) =>
   activity?.type === 'notice' && activity.notice === 'refused' && STALE_EVIDENCE.has(activity.code)
 
-const holds = (backoff: Backoff, entry: KeyBackoff | undefined) =>
+const holds = (backoff: Backoff, entry: KeyBackoff | undefined): entry is KeyBackoff =>
   entry !== undefined && backoff.block < entry.until
 
 /**
- * Whether `key` waits before `task` may be prepared again, its own backoff or one an untasked act
- * of the key set; with no `task`, whether any of the key's tasks waits.
+ * The wait that holds `task` of `key`: its own, or one an untasked act of the key set, whichever
+ * ends later.
+ */
+export const backoffHolding = (backoff: Backoff | undefined, key: string, task: string) =>
+  backoff === undefined
+    ? undefined
+    : [taskEntryOf(backoff.keys, key, task), taskEntryOf(backoff.keys, key, UNTASKED)]
+        .filter(entry => holds(backoff, entry))
+        .toSorted((a, b) => b.until - a.until)[0]
+
+/**
+ * Whether `key` waits before `task` may be prepared again ({@link backoffHolding}); with no `task`,
+ * whether any of the key's tasks waits.
  */
 export const isBackedOff = (backoff: Backoff | undefined, key: string, task?: string) => {
   if (backoff === undefined) return false
   if (task === undefined)
     return Object.values(entryOf(backoff.keys, key) ?? {}).some(entry => holds(backoff, entry))
-  return (
-    holds(backoff, taskEntryOf(backoff.keys, key, task)) ||
-    holds(backoff, taskEntryOf(backoff.keys, key, UNTASKED))
-  )
+  return backoffHolding(backoff, key, task) !== undefined
 }
 
 /** How many blocks a key waits after `failures` consecutive failures. */
@@ -193,6 +201,7 @@ export const declareBackoff = (
   if (![policy.baseBlocks, policy.maxBlocks].every(n => Number.isSafeInteger(n) && n >= 1))
     throw new GraphDefinitionError(`${id} needs baseBlocks and maxBlocks, whole numbers from 1`)
   const events = g.node<BackoffEvent>(`${id}.events`)
+  const initial: BackoffState = { block: 0, keys: {}, exempt: ownRecord() }
   const state = g.fold(id, {
     reads: {
       prepared: every(sources.prepared),
@@ -201,7 +210,7 @@ export const declareBackoff = (
       head: every(sources.heads)
     },
     emits: [events],
-    initial: { block: 0, keys: {}, exempt: ownRecord() } as BackoffState,
+    initial,
     applyInput: (backoff, input) => {
       if (input.from === 'head') {
         const next = { ...backoff, block: Math.max(backoff.block, input.value.number) }

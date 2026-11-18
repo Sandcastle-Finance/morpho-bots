@@ -100,6 +100,14 @@ export class PolicyReentryError extends Error {
   }
 }
 
+/** A step observer called the runner or a runner context, which an observer must never do. */
+export class ObserverReentryError extends Error {
+  constructor() {
+    super('a step observer called the runner')
+    this.name = 'ObserverReentryError'
+  }
+}
+
 /** A request an effect must not run, such as a redelivery; the runner stops rather than run it twice. */
 export class RequestRefusedError extends Error {
   constructor(effect: string, reason: string) {

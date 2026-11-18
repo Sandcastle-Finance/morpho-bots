@@ -52,6 +52,16 @@ export type KeyedWrite<T, B extends Data = Data> =
 
 export const UNREAD: Keyed<never, never> = { coverage: { status: 'unknown' }, keys: {} }
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** Whether `value` has a {@link Keyed}'s outline: a coverage status and a record of keys, unchecked. */
+export const isKeyed = (value: unknown): value is Keyed<unknown> =>
+  isObject(value) &&
+  isObject(value.keys) &&
+  isObject(value.coverage) &&
+  typeof value.coverage.status === 'string'
+
 const present = <T, B extends Data>(value: T, basis: B, expiry?: number): KeyRecord<T, B> => ({
   status: 'present',
   value,
@@ -126,6 +136,61 @@ const applyKeyed = <T, B extends Data>(
   }
 }
 
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** The strings at each index of a list with no hole, read as {@link applyKeyed} reads them. */
+const stringsOf = (value: unknown) => {
+  if (!Array.isArray(value)) return undefined
+  const list: string[] = []
+  for (let at = 0; at < value.length; at++) {
+    const item: unknown = Object.hasOwn(value, at) ? value[at] : undefined
+    if (typeof item !== 'string') return undefined
+    list.push(item)
+  }
+  return list
+}
+
+/**
+ * What {@link applyKeyed} acts on in a {@link KeyedWrite}: every field the type names, with each
+ * entry's key, as a value the journal can carry.
+ * @throws WriteRefusedError - for a write that does not meet the type, which the level would misread.
+ */
+const judgeKeyedWrite = (node: string, write: unknown): Data => {
+  const refuse = (why: string) => new WriteRefusedError(node, `a keyed write ${why}`)
+  if (!isRecord(write)) throw refuse('is a record')
+  const { coverage, expiry, reason } = write
+  const optional = (field: 'keys' | 'absent' | 'failed') => {
+    if (write[field] === undefined) return {}
+    const list = stringsOf(write[field])
+    if (!list) throw refuse(`lists its ${field} as strings, with no hole`)
+    return { [field]: list }
+  }
+  if (coverage === 'unknown' || coverage === 'failed') {
+    if (reason !== undefined && typeof reason !== 'string') throw refuse('gives its reason as text')
+    return { coverage, ...optional('keys'), ...(reason !== undefined && { reason }) }
+  }
+  if (coverage !== 'complete' && coverage !== 'carried')
+    throw refuse('is complete, carried, unknown or failed')
+  const { entries } = write
+  if (!isRecord(entries)) throw refuse('carries its entries')
+  const keys = Object.keys(entries)
+  if (keys.some(key => entries[key] === undefined))
+    throw refuse('gives every entry it names a value')
+  if (write.basis === undefined) throw refuse('carries its basis')
+  if (expiry !== undefined && !Number.isSafeInteger(expiry))
+    throw refuse('gives its expiry as a safe integer')
+  if (coverage === 'complete' && write.empty !== undefined && write.empty !== true)
+    throw refuse('asserts empty only as true')
+  return {
+    coverage,
+    entries: keys.toSorted(),
+    ...(expiry !== undefined && { expiry: expiry as number }),
+    ...(write.empty === true && { empty: true }),
+    ...(coverage === 'carried' && { ...optional('absent'), ...optional('failed') })
+  }
+}
+
 /**
  * A keyed level over the writes a source adapter makes to `writes`, applied in delivery order.
  * @throws WriteRefusedError - in the step, stopping the runner, for an unasserted empty level.
@@ -134,16 +199,18 @@ export const keyedLevel = <T, B extends Data = Data>(
   g: GraphBuilder,
   id: string,
   writes: Stream<KeyedWrite<T, B>>
-) =>
-  g.fold(
+) => {
+  const unread: Keyed<T, B> = UNREAD
+  return g.fold(
     id,
     {
-      reads: { write: every(writes) },
-      initial: UNREAD as Keyed<T, B>,
+      reads: { write: every(writes, judgeKeyedWrite) },
+      initial: unread,
       applyInput: (keyed, { value }) => ({ state: applyKeyed(id, keyed, value) })
     },
     { expiries: expiriesOf }
   )
+}
 
 type WithInputs = Record<string, Latest<unknown>>
 
@@ -172,7 +239,7 @@ export type KeyedMapOptions<I, W extends WithInputs> = Readonly<{
  * @throws WriteRefusedError - in the step, stopping the runner, for an `expiry` that is not a
  * non-negative safe integer.
  */
-export const keyedMap = <I, O, W extends WithInputs = Record<never, never>, B extends Data = Data>(
+export const keyedMap = <I, O, W extends WithInputs = {}, B extends Data = Data>(
   g: GraphBuilder,
   id: string,
   over: Node<Keyed<I, B>>,

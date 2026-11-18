@@ -1,5 +1,6 @@
 import type { SpanProcessor } from '@opentelemetry/sdk-trace-node'
 
+import { SpanStatusCode } from '@opentelemetry/api'
 import { describe, expect, test, vi } from 'vitest'
 
 import { withSpanSanitizer } from '../src/span-sanitizer.utils'
@@ -23,14 +24,17 @@ describe('withSpanSanitizer', () => {
     }
     const span = endedSpan({
       events: [{ name: 'exception' }, { name: 'harmless' }, { name: 'exception' }],
-      status: { code: 2, message: 'connect ECONNREFUSED https://user:key@rpc.example/v2/secret' }
+      status: {
+        code: SpanStatusCode.ERROR,
+        message: 'connect ECONNREFUSED https://user:key@rpc.example/v2/secret'
+      }
     })
 
     withSpanSanitizer(inner).onEnd(span)
 
     expect(seen).toEqual([span])
     expect(span.events.map(event => event.name)).toEqual(['harmless'])
-    expect(span.status).toEqual({ code: 2 })
+    expect(span.status).toEqual({ code: SpanStatusCode.ERROR })
   })
 
   test('reduces a legacy http.url attribute to the redacted origin', () => {
@@ -42,7 +46,7 @@ describe('withSpanSanitizer', () => {
     }
     const span = endedSpan({
       events: [],
-      status: { code: 0 },
+      status: { code: SpanStatusCode.UNSET },
       attributes: {
         'url.full': 'https://rpc.example',
         'http.url': 'https://rpc.example/v2/secret-key?token=leak'
@@ -53,7 +57,7 @@ describe('withSpanSanitizer', () => {
 
     const bare = endedSpan({
       events: [],
-      status: { code: 0 },
+      status: { code: SpanStatusCode.UNSET },
       attributes: { 'http.url': 'https://rpc.example/v2/secret-key' }
     })
     withSpanSanitizer(inner).onEnd(bare)
@@ -68,13 +72,13 @@ describe('withSpanSanitizer', () => {
       shutdown: vi.fn(async () => {})
     }
     const sanitizer = withSpanSanitizer(inner)
-    const span = endedSpan({ events: [], status: { code: 0 } })
+    const span = endedSpan({ events: [], status: { code: SpanStatusCode.UNSET } })
 
     sanitizer.onEnd(span)
     await sanitizer.forceFlush()
     await sanitizer.shutdown()
 
-    expect(span.status).toEqual({ code: 0 })
+    expect(span.status).toEqual({ code: SpanStatusCode.UNSET })
     expect(inner.onEnd).toHaveBeenCalledWith(span)
     expect(inner.forceFlush).toHaveBeenCalledOnce()
     expect(inner.shutdown).toHaveBeenCalledOnce()

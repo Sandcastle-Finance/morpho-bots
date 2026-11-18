@@ -1,5 +1,5 @@
 # Runs the per-chain vault-v1-reallocation bots. All data comes over RPC, so there is no indexer or
-# database to run. The bots' build context is the repo root so the pnpm workspace (packages/*)
+# database to run. The bots' build context is the repo root so the Bun workspace (packages/*)
 # resolves — see Dockerfile. Set the chainId-suffixed RPCs/whitelists (RPC_URL_1, VAULT_WHITELIST_1,
 # …) and a REALLOCATOR_PRIVATE_KEY holding the allocator role on every whitelisted vault. The tuning
 # knobs are chainId-suffixed too (REALLOCATION_INTERVAL_MS_1, …) so chains can differ; leave one

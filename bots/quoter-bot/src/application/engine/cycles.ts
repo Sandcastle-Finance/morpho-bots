@@ -13,7 +13,8 @@ import { decidePositionBootstrapTransition } from '../../domain/position-bootstr
 
 /** What the failure budget reads of one market's report. */
 export type CycleReport = Readonly<
-  Pick<MarketReport, 'workflow' | 'marketId' | 'status'> & Pick<MarketReport, 'stage' | 'action'>
+  Pick<MarketReport, 'workflow' | 'marketId' | 'status'> &
+    Pick<MarketReport, 'stage' | 'action' | 'redeemedUnits'>
 >
 
 /**
@@ -66,14 +67,24 @@ export const EMPTY_BUDGET: FailureBudget = {
 }
 
 /**
- * Counts one cycle into each workflow's budget: five consecutive failing polls of one market.
+ * Whether a report is a redemption's, decided or ended: never charged to the budget, since a
+ * redemption that does not settle leaves no quote stale, and never clearing what quoting charged.
+ */
+const redemption = (report: CycleReport) =>
+  report.redeemedUnits !== undefined || report.stage === 'redeem'
+
+/**
+ * Counts one cycle into each workflow's budget: five consecutive failing polls of one market,
+ * redemptions aside.
  * @param budget - The budget before this cycle.
  * @param cycle - The completed poll to count.
  * @returns The next budget; an exhausted workflow stays exhausted.
  */
 export const foldBudget = (budget: FailureBudget, cycle: Cycle): FailureBudget => {
   const next = (workflow: Workflow): WorkflowBudget => {
-    const polled = cycle.counted.filter(report => report.workflow === workflow)
+    const polled = cycle.counted.filter(
+      report => report.workflow === workflow && !redemption(report)
+    )
     const unresolved = new Set(budget[workflow].unresolved)
     for (const report of polled) {
       const after = unresolvedAfter(report)

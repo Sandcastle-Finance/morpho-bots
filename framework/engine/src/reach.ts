@@ -46,7 +46,7 @@ export const reachable = (
     }))
   ].filter(step => !skipped.has(step.id))
   const via = new Map(from.map(node => [node.id, node.id]))
-  for (let grew = true; grew; ) {
+  for (let grew = true; grew;) {
     grew = false
     for (const step of steps) {
       const hit = step.from.find(node => via.has(node))

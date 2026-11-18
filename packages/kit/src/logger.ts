@@ -18,6 +18,9 @@ export type Logger = Record<LogLevel, (event: string, fields?: Record<string, un
  */
 export type BotLogger = Logger & { readonly layer: LogLayer }
 
+/** How long a line waits to ship with others; it sets how far a live view trails the bot. */
+const BATCH_SEND_TIMEOUT_MS = 1_000
+
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 }
 
 /** Fields bound once and stamped onto every line — the wide-log context (e.g. bot, chainId). */
@@ -73,7 +76,7 @@ function stderrTransport(): LogLayerTransport {
 // activity, no transport, byte-identical stderr behavior). The host is bare
 // (e.g. `s1234.eu.betterstackdata.com`), so prepend the scheme the transport's `url` param requires.
 // onError writes a single PLAIN stderr line (NOT through loglayer — that would recurse back through
-// this same transport). Batching defaults (batchSize 100 / batchSendTimeout 5s), maxRetries 3, and
+// this same transport). Batches ship every BATCH_SEND_TIMEOUT_MS or 100 lines; maxRetries 3, and
 // respectRateLimit true are all accepted: after retries are exhausted the batch is DROPPED — shipping
 // is in-process best-effort and off the tick path, so it must never throw into or block the loop (the
 // transport try/catches its own send). There is no public flush() seam, so a few batched lines may be
@@ -108,6 +111,7 @@ function betterStackTransport(
   return new BetterStackTransport({
     sourceToken,
     url,
+    batchSendTimeout: BATCH_SEND_TIMEOUT_MS,
     onError: error => {
       const detail = error instanceof Error ? error.message : String(error)
       console.error(

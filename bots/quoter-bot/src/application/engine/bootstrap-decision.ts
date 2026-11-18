@@ -65,7 +65,7 @@ type BootstrapInput = Readonly<{
 const cancel = (ids: readonly string[], condition: string, report: Classification): Act => ({
   kind: 'cancel',
   identity: `cancel:${ids.join(',')}`,
-  payload: { cancel: [...ids], report } as never,
+  payload: { cancel: [...ids], report },
   condition
 })
 

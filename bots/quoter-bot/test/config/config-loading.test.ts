@@ -237,6 +237,25 @@ describe('ConfigService YAML and environment loading', () => {
     expect(config.writePolicy?.maxFeePerGasWei).toBe(500_000_000n)
   })
 
+  test('reads a root YAML redeemWithdrawable, which only a non-blank environment overrides', async () => {
+    const directory = await temporaryDirectory()
+    const path = join(directory, 'operator.yaml')
+    await writeFile(path, yaml('redeemWithdrawable: false\n'))
+
+    expect((await ConfigService.load({}, { configPath: path })).redeemWithdrawable).toBe(false)
+    expect(
+      (await ConfigService.load({ REDEEM_WITHDRAWABLE: 'true' }, { configPath: path }))
+        .redeemWithdrawable
+    ).toBe(true)
+    for (const blank of ['', ' '])
+      expect(
+        (await ConfigService.load({ REDEEM_WITHDRAWABLE: blank }, { configPath: path }))
+          .redeemWithdrawable
+      ).toBe(false)
+    await writeFile(path, yaml())
+    expect((await ConfigService.load({}, { configPath: path })).redeemWithdrawable).toBe(true)
+  })
+
   test('rejects a YAML maxFeeGwei in exponent notation', async () => {
     const directory = await temporaryDirectory()
     const path = join(directory, 'operator.yaml')

@@ -45,6 +45,31 @@ describe('createDeploylessClient', () => {
   })
 })
 
+describe('createDeploylessClient timeoutMs', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('aborts each request after the given timeout instead of the default', async () => {
+    const waited: number[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation(((
+      _url: string | URL,
+      init?: { signal?: AbortSignal }
+    ) => {
+      const began = Date.now()
+      return new Promise((_, reject) =>
+        init?.signal?.addEventListener('abort', () => {
+          waited.push(Date.now() - began)
+          reject(init.signal!.reason)
+        })
+      )
+    }) as unknown as typeof fetch)
+    const client = createDeploylessClient({ chain: base, rpcUrl: RPC, timeoutMs: 50 })
+
+    await expect(getBlockNumber(client, { cacheTime: 0 })).rejects.toThrow()
+    expect(waited.length).toBeGreaterThan(0)
+    expect(Math.max(...waited)).toBeLessThan(1_000)
+  })
+})
+
 describe('MAX_DEPLOYLESS_BATCH_SIZE', () => {
   const build = (value: string) =>
     createDeploylessClient({

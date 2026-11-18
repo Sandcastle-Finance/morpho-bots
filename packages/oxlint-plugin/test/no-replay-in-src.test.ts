@@ -10,6 +10,7 @@ ruleTester.run('no-replay-in-src', noReplayInSrc, {
     { code, filename: path.join('bots', 'quoter-bot', 'test', 'scenario', 'stages.test.ts') },
     { code, filename: path.join('framework', 'kernel', 'test', 'host.test.ts') },
     { code, filename: path.join('bots', 'blue', 'scripts', 'replay-journal.ts') },
+    { code, filename: path.join('tools', 'journal', 'src', 'cli.ts') },
     {
       code: "import { createRunner } from '@repo/engine'",
       filename: path.join('bots', 'blue', 'src', 'run.ts')

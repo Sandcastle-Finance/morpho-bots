@@ -14,7 +14,8 @@ import { outcomeReport, unavailableReport } from '../../application/engine/marke
  * outcome as it ends; and the markets' current decisions whenever one changes between polls. A poll
  * leaves out each market not in flight that awaits its preparation, which a later `poll` reports
  * once its decision is made; a market in flight may still report `preparing`. A preparation that
- * outlives its deadline is reported and counted as a failed `prepare` when it times out.
+ * outlives its deadline is reported and counted as a failed `prepare` when it times out. An act
+ * its market superseded is reported as it ends but never counted.
  */
 export type QuoterReport =
   | Readonly<{
@@ -130,15 +131,17 @@ export const createPolls = (keys: readonly string[], dry: boolean) => ({
       ),
       ...(condition === undefined ? {} : { condition })
     }
+    const outcome: QuoterReport = {
+      type: 'outcome',
+      key: event.key,
+      report,
+      settled: event.outcome.notice === 'settled'
+    }
+    if (event.outcome.supersededBy !== undefined) return { state, report: outcome }
     const { [event.key]: _, ...inFlight } = state.inFlight
     return {
       state: { ...state, inFlight, ended: { ...state.ended, [event.key]: report } },
-      report: {
-        type: 'outcome',
-        key: event.key,
-        report,
-        settled: event.outcome.notice === 'settled'
-      }
+      report: outcome
     }
   },
 
@@ -181,7 +184,10 @@ export const createPolls = (keys: readonly string[], dry: boolean) => ({
     keys.forEach((key, i) => {
       if (awaiting(key, i)) deferred[key] = !(key in state.ended)
     })
-    const decided = reports.filter((_, i) => !(keys[i]! in deferred))
+    const decided = reports.filter((_, i) => {
+      const key = keys[i]!
+      return !(key in deferred)
+    })
     const counted = keys.flatMap((key, i) =>
       state.inFlight[key] || deferred[key] ? [] : [state.ended[key] ?? reports[i]!]
     )

@@ -2,29 +2,23 @@ import type { Finality } from '@repo/kit'
 import type { Address, Hex } from 'viem'
 
 import { MAX_CONTINUOUS_FEE } from '@morpho-org/midnight-sdk'
-import { isValidPrivateKey } from '@repo/kit'
+import {
+  assertFinalityInWindow,
+  FinalityBeyondWindowError,
+  isValidPrivateKey,
+  parseFinality
+} from '@repo/kit'
 import { getAddress, isAddress, isHex, parseGwei, size } from 'viem'
 
 import { MAX_LOSS_FACTOR } from '../domain/loss-factor'
 import { ConfigValidationError } from '../errors'
-import {
-  bootstrapConfigsValue,
-  hexListValue,
-  ladderConfigsValue,
-  parseBytes32
-} from './market-collections'
+import { parseBytes32 } from './market-collections'
 import {
   isSupportedChainId,
   SUPPORTED_CHAIN_IDS,
+  supportedChain,
   type SupportedChainId
 } from './supported-chains.utils'
-
-export {
-  bootstrapConfigsValue,
-  hexListValue,
-  ladderConfigsValue,
-  parseBytes32
-} from './market-collections'
 
 /** String-valued runtime environment boundary accepted by configuration parsing. */
 export type Environment = Record<string, string | undefined>
@@ -407,21 +401,44 @@ export const continuousFeeCapValue = (environment: Environment) => {
 }
 
 /**
+ * Reads whether a market redeems the maker's withdrawable credit at par before it quotes.
+ * @param environment - Environment map to inspect.
+ * @returns `true` unless `REDEEM_WITHDRAWABLE` is `false`; unset or empty is `true`.
+ * @throws When set to anything but `true` or `false`.
+ */
+export const redeemWithdrawableValue = (environment: Environment) => {
+  const value = environment.REDEEM_WITHDRAWABLE?.trim()
+  if (!value || value === 'true') return true
+  if (value === 'false') return false
+  throw new ConfigValidationError(
+    'REDEEM_WITHDRAWABLE',
+    'invalid-boolean',
+    'REDEEM_WITHDRAWABLE must be true or false'
+  )
+}
+
+/**
  * Reads the kernel's finality rule: `safe` (the default), `finalized`, or a block depth.
  * @param environment - Environment map to inspect.
+ * @param chainId - The chain whose reorg window a block depth must stay inside.
  * @returns The finality rule.
- * @throws When `FINALITY` is set to anything else.
+ * @throws When `FINALITY` is set to anything else, or to a depth the reorg window cannot reach.
  */
-export const finalityValue = (environment: Environment): Finality => {
-  const value = environment.FINALITY?.trim()
-  if (value === undefined || value === '' || value === 'safe') return 'safe'
-  if (value === 'finalized') return 'finalized'
-  if (/^[1-9]\d{0,5}$/.test(value)) return { depth: Number(value) }
-  throw new ConfigValidationError(
-    'FINALITY',
-    'invalid-finality',
-    'FINALITY must be safe, finalized, or a positive block depth'
-  )
+export const finalityValue = (environment: Environment, chainId: SupportedChainId): Finality => {
+  const finality = parseFinality(environment.FINALITY?.trim() || 'safe')
+  if (finality === undefined)
+    throw new ConfigValidationError(
+      'FINALITY',
+      'invalid-finality',
+      'FINALITY must be safe, finalized, or a positive block depth'
+    )
+  try {
+    assertFinalityInWindow(supportedChain(chainId), finality)
+  } catch (error) {
+    if (!(error instanceof FinalityBeyondWindowError)) throw error
+    throw new ConfigValidationError('FINALITY', 'out-of-range', error.message)
+  }
+  return finality
 }
 
 /**

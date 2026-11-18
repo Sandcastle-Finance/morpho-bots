@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import { defineConfig } from 'vitest/config'
 
-// Workspace runner: every member that carries tests is a project. The two liquidation bots hold
+// Workspace runner: every member that carries tests is a project. The bots with soltag lenses hold
 // their own vitest.config.ts (soltag `sol``` transform + fork-suite env files); the rest run with
 // defaults rooted at their own directory. The public mirror ships a subset of these members, so
 // absent ones are dropped rather than failing the run.
@@ -20,13 +20,16 @@ const members = [
   'packages/oxlint-plugin',
   'packages/telemetry',
   'tools/sessions',
+  'tools/realtime-app',
+  'tools/journal',
   'bots/blue-liquidation',
   'bots/vault-v1-reallocation',
   'bots/vault-v2-reallocation',
   'bots/midnight-liquidation',
   'bots/midnight-crossed-books',
   'bots/monitor-bot',
-  'bots/quoter-bot'
+  'bots/quoter-bot',
+  'bots/roller'
 ].filter(member => fs.existsSync(new URL(`${member}/package.json`, import.meta.url)))
 
 export default defineConfig({

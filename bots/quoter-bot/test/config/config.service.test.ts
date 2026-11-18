@@ -196,6 +196,26 @@ describe('ConfigService', () => {
       )
   })
 
+  test('refuses a finality depth the reorg window cannot reach', () => {
+    expect(ConfigService.from({ ...environment, FINALITY: '2999' }).finality).toEqual({
+      depth: 2_999
+    })
+    expect(() => ConfigService.from({ ...environment, FINALITY: '3000' })).toThrow(
+      expect.objectContaining({ field: 'FINALITY', reason: 'out-of-range' })
+    )
+  })
+
+  test('refuses fee bounds that fund no step bid below a nonce fill', () => {
+    expect(() =>
+      ConfigService.from({ ...environment, MAX_TRANSACTION_SPEND_WEI: '100000' })
+    ).toThrow(
+      expect.objectContaining({ field: 'MAX_TRANSACTION_SPEND_WEI', reason: 'out-of-range' })
+    )
+    expect(() => ConfigService.from({ ...environment, MAX_FEE_GWEI: '0.000000001' })).toThrow(
+      'cannot fund a nonce fill'
+    )
+  })
+
   test('requires the kernel enrollment, and a continuous-fee cap within the protocol maximum', () => {
     expect(ConfigService.from(environment).writePolicy).toMatchObject({
       enrollment: 'enrolling',
@@ -220,6 +240,20 @@ describe('ConfigService', () => {
     ).toThrow('MAX_CONTINUOUS_FEE_CAP must not exceed the protocol maximum continuous fee')
   })
 
+  test('redeems withdrawable credit unless REDEEM_WITHDRAWABLE is false', () => {
+    for (const on of [undefined, '', ' ', 'true', ' true '])
+      expect(
+        ConfigService.from({ ...environment, REDEEM_WITHDRAWABLE: on }).redeemWithdrawable
+      ).toBe(true)
+    expect(
+      ConfigService.from({ ...environment, REDEEM_WITHDRAWABLE: 'false' }).redeemWithdrawable
+    ).toBe(false)
+    for (const invalid of ['yes', '1', 'TRUE'])
+      expect(() => ConfigService.from({ ...environment, REDEEM_WITHDRAWABLE: invalid })).toThrow(
+        'REDEEM_WITHDRAWABLE must be true or false'
+      )
+  })
+
   test('rejects malformed private keys and unsigned integer settings', () => {
     expect(() => ConfigService.from({ ...environment, MAKER_PRIVATE_KEY: '0x12' })).toThrow(
       'MAKER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string'
@@ -236,7 +270,7 @@ describe('ConfigService', () => {
     ['0.005', 5_000_000n],
     ['1', 1_000_000_000n],
     ['  0.005\t', 5_000_000n],
-    ['0.000000001', 1n]
+    ['0.000000002', 2n]
   ] as const)('parses MAX_FEE_GWEI=%j as decimal gwei', (value, expected) => {
     const config = ConfigService.from({ ...environment, MAX_FEE_GWEI: value })
 

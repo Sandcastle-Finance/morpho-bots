@@ -167,8 +167,8 @@ describe('kernel transaction signing', () => {
       )
       return {
         nonce: request.nonce,
-        txHash: '0xaa' as Hex,
-        raw: signedRaw as Hex,
+        txHash: '0xaa',
+        raw: signedRaw,
         gas: request.gas!
       }
     })

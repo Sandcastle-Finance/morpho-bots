@@ -6,14 +6,12 @@ import { runIdAt } from '@repo/controller'
 import {
   assertContractDeployed,
   blocksFor,
-  buildIdentityFromEnv,
   callAt,
   createBalanceMonitor,
   createDeploylessClient,
   createHeartbeatMonitor,
   createJournalFileSink,
-  createLogger,
-  parseJournalRunCapBytes
+  createLogger
 } from '@repo/kit'
 import { join } from 'node:path'
 import { isAddress, isAddressEqual } from 'viem'
@@ -67,7 +65,7 @@ const assertDeployed = async (config: Config, client: Client) => {
     client,
     config.resolver,
     'CrossedBooksResolver',
-    'deploy it with `pnpm --filter @repo/contracts run deploy:crossed-books-resolver`'
+    'deploy it with `bun run --filter @repo/contracts deploy:crossed-books-resolver`'
   )
   const midnight = await readContract(client, {
     address: config.resolver,
@@ -122,8 +120,7 @@ const readonly = async (config: Config, caller: Address) => {
 }
 
 const write = async (config: Config, mode: WriteConfig) => {
-  const build = buildIdentityFromEnv(process.env)
-  const runCapBytes = parseJournalRunCapBytes(process.env.JOURNAL_RUN_CAP_BYTES)
+  const { build, runCapBytes } = mode.kernel.journal
   const logger = createLogger('info', {
     context: { bot: 'midnight-crossed-books', chainId: config.chainId, ...build }
   })

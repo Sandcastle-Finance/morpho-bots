@@ -9,10 +9,16 @@ export { ethCallGasCap } from './gas-limits'
 export { createHeartbeatMonitor, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS } from './heartbeat'
 export type { Finality } from './kernel-chain'
 export { blockTagAt, callAt, createKernelChain, parseFinality } from './kernel-chain'
-export { createKernelEffects, firstBid, gasLimitFor } from './kernel-effects'
+export { createKernelEffects, createMarketTip, firstBid, gasLimitFor } from './kernel-effects'
+export type { KernelSettings } from './kernel-settings'
+export { fundsStepBid, parseKernelSettings } from './kernel-settings'
+export type { LiveLog, LiveLogOptions } from './live-log'
+export { declareLiveLog, LIVE_PART_BYTES, LIVE_PROTOCOL } from './live-log'
 export type { BotLogger, CreateLoggerOptions, LogContext, Logger, LogLevel } from './logger'
 export { createLogger } from './logger'
 export {
+  FinalityBeyondWindowError,
+  InvalidKernelSettingError,
   JournalFileError,
   MissingBuildIdentityError,
   NoCommitmentsError,
@@ -23,7 +29,8 @@ export type {
   JournalBuildIdentity,
   JournalFileOptions,
   JournalHeader,
-  JournalReadResult,
+  JournalRead,
+  JournalReadOutcome,
   JournalRunCap
 } from './journal-file'
 export {
@@ -40,7 +47,8 @@ export {
   DEFAULT_MAX_GAS_LIMIT,
   EXECUTOR_SELECTOR,
   evaluatePolicy,
-  NONCE_FILL_MAX_GAS
+  NONCE_FILL_MAX_GAS,
+  policyGasLimit
 } from './policy'
 export type { RevertDecoder } from './revert.utils'
 export { abiRevertDecoder, isCallRevert, revertReason } from './revert.utils'
@@ -54,7 +62,9 @@ export type { SimulateResult } from './simulate'
 export { simulateCall, simulateLiquidationExec } from './simulate'
 export type { TransactionKernelLimits, TransactionKernelOptions } from './transaction-kernel'
 export {
+  assertFinalityInWindow,
   reorgDepthFor,
+  TRANSACTION_KERNEL_POLL_MS,
   TRANSACTION_KERNEL_RESERVATIONS,
   transactionKernelConfig,
   transactionKernelSpec

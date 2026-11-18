@@ -104,10 +104,9 @@ export const declareWorkflow = <D extends string>(
       ...Object.fromEntries(options.facts.map((node, i) => [`fact${i}`, watch(node)]))
     },
     emits: [requests, events],
-    initial: { facts: {}, sent: {} } as Workflow,
+    initial: { facts: {}, sent: {} },
     applyInput: (workflow, input) => {
-      if (input.from === 'kernel')
-        return { state: { ...workflow, kernelState: input.value.value as KernelState } }
+      if (input.from === 'kernel') return { state: { ...workflow, kernelState: input.value.value } }
       const node = options.facts[Number(String(input.from).slice(4))]!
       const keyed = (input.value as { value?: Keyed<unknown> }).value
       const { [node.id]: _, ...facts } = workflow.facts

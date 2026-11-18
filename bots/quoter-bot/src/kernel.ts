@@ -22,6 +22,7 @@ import {
   reorgDepthFor,
   callAt,
   createAccountSigner,
+  createBalanceMonitor,
   createKernelChain,
   createKernelEffects,
   createKeystoreAccount,
@@ -31,6 +32,7 @@ import {
   type Logger,
   type Policy,
   type PolicyRule,
+  policyGasLimit,
   SignerAccountError
 } from '@repo/kit'
 import {
@@ -40,21 +42,21 @@ import {
 } from '@repo/validators'
 import { join } from 'node:path'
 import {
-  createPublicClient,
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
   getAbiItem,
-  http,
   isAddressEqual,
   parseAbi,
   toFunctionSelector
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { getBalance } from 'viem/actions'
 
 import type { MonitoringEvent } from './application/monitoring/monitoring-event'
 import type { ConfigService } from './config/config.service'
 import type { QuoterHosting } from './graph'
+import type { ReadClient } from './infrastructure/provider/read-clients'
 
 import { operatorErrorName } from './application/monitoring/operator-error-name.utils'
 import { supportedChain } from './config/supported-chains.utils'
@@ -96,6 +98,16 @@ const MIN_LATCH_BOUND_BLOCKS = 100
 const RECOVERY_BOUND_MS = 15 * 60_000
 const MAX_RECOVERY_ATTEMPTS = 3
 const MAX_DISPATCH_LAG_MS = 10_000
+/**
+ * A `withdraw` is its selector, four head words, the market tuple's eight head words, and its
+ * collateral array's length and four words per collateral, up to Midnight's `MAX_COLLATERALS` (128).
+ */
+const MAX_REDEMPTION_DATA_BYTES = 4 + 32 * (4 + 8 + 1) + 32 * 4 * 128
+/**
+ * About twice the most a `withdraw` measured on a Base fork of the deployed Midnight: 296,350 gas
+ * at 128 collaterals, its first fee-accrual write, and its full calldata ceiling.
+ */
+const MAX_REDEMPTION_GAS = 600_000n
 /** Missed cycles a workflow may skip before the kernel withdraws the groups it stopped affirming. */
 const AFFIRMATION_CYCLES = 3
 
@@ -122,6 +134,12 @@ const operationRules = (config: ConfigService): PolicyRule[] => {
       selector: toFunctionSelector(getAbiItem({ abi: midnightAbi, name: 'multicall' })),
       maxGasLimit: policy.maxBatchCancellationGas,
       maxDataBytes: policy.maxBatchCancellationDataBytes
+    },
+    {
+      target: config.setup.midnight,
+      selector: toFunctionSelector(getAbiItem({ abi: midnightAbi, name: 'withdraw' })),
+      maxGasLimit: MAX_REDEMPTION_GAS,
+      maxDataBytes: MAX_REDEMPTION_DATA_BYTES
     }
   ]
   if (policy.maxRatificationGas !== undefined) {
@@ -247,6 +265,27 @@ const signerLogger = (writeEvent: Parameters<typeof emitSafely>[0]): Logger => {
       if (event === 'signer.policy_violation')
         emitSafely(writeEvent, { event, ...fields } as MonitoringEvent)
     }
+  }
+}
+
+/** Writes the signer's `signer.balance` records, and a failed read without its error text. */
+const balanceLogger = (writeEvent: Parameters<typeof emitSafely>[0]): Logger => {
+  const quiet = () => undefined
+  return {
+    debug: quiet,
+    info: (event, fields) => {
+      if (event === 'signer.balance')
+        emitSafely(writeEvent, { event, ...fields } as MonitoringEvent)
+    },
+    warn: (event, fields) => {
+      if (event === 'signer.balance_failed')
+        emitSafely(writeEvent, {
+          event,
+          address: (fields as { address: Address }).address,
+          status: 'failed'
+        })
+    },
+    error: quiet
   }
 }
 
@@ -383,11 +422,11 @@ export const quoterReceiptLogs =
       ]
     }
     const call = decodeWith(midnightAbi, data)
-    const calls = call?.functionName === 'multicall' ? (call.args[0] as readonly Hex[]) : [data]
+    const calls = call?.functionName === 'multicall' ? call.args[0] : [data]
     return calls.flatMap(inner => {
       const cancel = decodeWith(midnightAbi, inner)
       if (cancel?.functionName !== 'setConsumed') return []
-      const [group, amount, onBehalf] = cancel.args as readonly [Hex, bigint, Address]
+      const [group, amount, onBehalf] = cancel.args
       return [
         {
           address: payload.to,
@@ -406,16 +445,15 @@ export const quoterReceiptLogs =
  * The configured chain's heads, blocks and finality, for a read-only run's dry kernel to follow, so
  * its world reads pin to real blocks.
  * @param config - Validated runtime config.
+ * @param client - The process's shared chain read client.
  * @returns The chain reads a dry world follows.
  */
 export const followedChain = (
-  config: ConfigService
+  config: ConfigService,
+  client: ReadClient
 ): Pick<KernelChain, 'latest' | 'block' | 'safe'> =>
   createKernelChain({
-    client: createPublicClient({
-      chain: supportedChain(config.chainId),
-      transport: http(config.rpcUrl, { timeout: config.requestTimeoutMs })
-    }),
+    client,
     account: config.setup.maker,
     finality: config.finality,
     commitment: () => Promise.reject(new DryRunError('a dry run observes no commitment'))
@@ -454,18 +492,25 @@ export const dryHosting = (
   }
 }
 
+declare const loaded: unique symbol
+
+/** A signer {@link loadQuoterSigner} loaded: its address, while its account stays in this module. */
+export type QuoterSigner = Readonly<{ address: Address; [loaded]: true }>
+
+const accounts = new WeakMap<QuoterSigner, LocalAccount>()
+
 /**
- * The account the kernel signs with, with no nonce manager: the kernel allocates every nonce.
+ * Loads the account the kernel signs with, with no nonce manager: the kernel allocates every nonce.
  * @param identity - Validated write-enabled signer identity.
  * @param dependencies - Overrides for the keystore read and decryption, and the KMS calls.
- * @returns The private-key, keystore, or KMS account the identity selects.
+ * @returns The signer the private-key, keystore, or KMS identity selects, holding only its address.
  * @throws `SignerAccountError` when the credential cannot be loaded, or the account is not the one
  * the identity requires: the maker itself, or for KMS a separate key the maker authorized.
  */
-export const createSignerAccount = async (
+export const loadQuoterSigner = async (
   identity: Exclude<ConfigService['identity'], { readOnly: true }>,
   dependencies: KeystoreDependencies & { kms?: KmsSigner } = {}
-): Promise<LocalAccount> => {
+): Promise<QuoterSigner> => {
   const account =
     identity.method === 'private-key'
       ? privateKeyToAccount(identity.privateKey)
@@ -474,36 +519,40 @@ export const createSignerAccount = async (
         : await createKmsAccount(identity, dependencies.kms)
   if ((identity.method === 'aws') === isAddressEqual(account.address, identity.maker))
     throw new SignerAccountError('signer-address')
-  return account
+  const signer = Object.freeze({ address: account.address }) as QuoterSigner
+  accounts.set(signer, account)
+  return signer
 }
 
 /**
  * The kernel the quoter's engine hosts for its signer: its configuration, ledger, chain reads, and
  * effects. The engine builds every plan's dependent step itself.
- * @param parameters - Validated write configuration, the signing account, and optional writers.
- * @returns The kernel's hosting, and the signer it signs as.
- * @throws `QuoterTransactionError` when writes are not configured, or the signer is not the one
- * the configuration names.
- * @remarks Every transaction the kernel signs also passes the kit signer's policy.
+ * @param parameters - Validated write configuration, the loaded signer, the process's shared chain
+ * read client, and optional writers.
+ * @returns The kernel's hosting, and the signer's address.
+ * @throws `QuoterTransactionError` when writes are not configured, the signer was not loaded by
+ * {@link loadQuoterSigner}, or it is not the one the configuration names.
+ * @remarks Every transaction the kernel signs also passes the kit signer's policy. Each head the
+ * hosted chain reads also samples the signer's balance about once a minute without waiting for it,
+ * and a failed sample is reported, never thrown.
  */
 export const quoterKernelSpec = (parameters: {
   config: ConfigService
-  account: LocalAccount
+  signer: QuoterSigner
+  client: ReadClient
   writeEvent?: (event: MonitoringEvent) => void | Promise<void>
   stateDirectory?: string
 }): { hosting: QuoterHosting; signer: Address } => {
-  const { config, account } = parameters
+  const { config, client } = parameters
+  const account = accounts.get(parameters.signer)
   const writePolicy = config.writePolicy
   const identity = config.identity
-  if (!writePolicy || identity.readOnly) throw new QuoterTransactionError('configuration')
+  if (!writePolicy || identity.readOnly || !account)
+    throw new QuoterTransactionError('configuration')
   // A KMS signer is a separate key the maker authorized; every other method signs as the maker.
   if ((identity.method === 'aws') === isAddressEqual(account.address, config.setup.maker))
     throw new QuoterTransactionError('signer-identity-mismatch')
   const chain = supportedChain(config.chainId)
-  const client = createPublicClient({
-    chain,
-    transport: http(config.rpcUrl, { timeout: config.requestTimeoutMs })
-  })
   const rules = operationRules(config)
   const policy = signingPolicy(config, rules)
   const signer = createAccountSigner({
@@ -519,11 +568,21 @@ export const quoterKernelSpec = (parameters: {
     signer,
     typedSigner: account,
     maxFeePerGasWei: writePolicy.maxFeePerGasWei,
-    maxGasLimit: rules.reduce(
-      (min, rule) => (rule.maxGasLimit < min ? rule.maxGasLimit : min),
-      policy.maxGasLimit
-    ),
+    maxGasLimit: request => policyGasLimit(policy, request),
     materialize: () => Promise.reject(new QuoterTransactionError('configuration'))
+  })
+  const chainReads = createKernelChain({
+    client,
+    account: account.address,
+    finality: config.finality,
+    commitment: async (id, at) =>
+      commitments.observe(await callAt(client, at, commitments.request(id)))
+  })
+  const balance = createBalanceMonitor({
+    address: account.address,
+    read: () => getBalance(client, { address: account.address }),
+    logger: balanceLogger(parameters.writeEvent),
+    chain
   })
   return {
     signer: account.address,
@@ -532,13 +591,14 @@ export const quoterKernelSpec = (parameters: {
       store: createLedgerStore(
         kernelLedgerPath(config.chainId, account.address, parameters.stateDirectory)
       ),
-      chain: createKernelChain({
-        client,
-        account: account.address,
-        finality: config.finality,
-        commitment: async (id, at) =>
-          commitments.observe(await callAt(client, at, commitments.request(id)))
-      }),
+      chain: {
+        ...chainReads,
+        latest: async () => {
+          const latest = await chainReads.latest()
+          void balance.maybeLog(BigInt(latest.head.number))
+          return latest
+        }
+      },
       effects,
       enrollment: writePolicy.enrollment,
       pollMs: POLL_MS,

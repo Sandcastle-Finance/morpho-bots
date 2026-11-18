@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ConfigService } from '../../../src/config/config.service'
 
 import { createWorldReads } from '../../../src/infrastructure/engine/world-reads'
+import { createReadClients } from '../../../src/infrastructure/provider/read-clients'
 
 const CHAIN_ID = 8453
 const maker: Hex = '0x1111111111111111111111111111111111111111'
@@ -63,7 +64,7 @@ afterEach(() => {
 describe('the production world reads', () => {
   test('read each chain value at the block they are pinned to by hash', async () => {
     const blocks = node()
-    const reads = createWorldReads(config)
+    const reads = createWorldReads(config, createReadClients(config).chain)
 
     expect(await reads.readCash(blockOf(HELD))).toEqual({ cashBalance: 42n, allowance: 42n })
     expect(blocks).toEqual([
@@ -74,13 +75,16 @@ describe('the production world reads', () => {
 
   test('fail every chain read at a block the node no longer holds, never reading by number', async () => {
     const blocks = node()
-    const reads = createWorldReads(config)
+    const reads = createWorldReads(config, createReadClients(config).chain)
     const block = blockOf(REORGED)
 
     await expect(reads.readCash(block)).rejects.toThrow()
     await expect(reads.readConsumed([group], block)).rejects.toThrow()
     await expect(reads.readMarket(marketId, block)).rejects.toThrow()
-    await expect(reads.readPosition(marketId, block)).rejects.toThrow()
+    const positions = await reads
+      .readPositions([marketId], block, block.timestamp)
+      .catch((error: unknown) => [{ status: 'rejected' as const, reason: error }])
+    expect(positions.map(position => position.status)).toEqual(['rejected'])
     expect(blocks.length).toBeGreaterThanOrEqual(5)
     for (const pinned of blocks)
       expect(pinned).toEqual({ blockHash: REORGED, requireCanonical: true })

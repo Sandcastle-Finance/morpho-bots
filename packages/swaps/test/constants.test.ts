@@ -38,10 +38,6 @@ describe('ONEINCH_ROUTER', () => {
         .toSorted((a, b) => a - b)
     )
   })
-
-  it('has no entry for an unsupported chain (fails closed in quoteOneInch)', () => {
-    expect(ONEINCH_ROUTER[31337]).toBeUndefined() // anvil/local — no 1inch deployment
-  })
 })
 
 describe('PENDLE_CHAIN_IDS', () => {

@@ -1,4 +1,4 @@
-import type { IMarket } from '@morpho-org/midnight-sdk'
+import type { IMarket, MarketParams } from '@morpho-org/midnight-sdk'
 import type { Hex } from 'viem'
 
 import type { LoanCollateral } from '../../domain/debt-ceiling'
@@ -23,6 +23,16 @@ export type WorldPosition = Readonly<{
   maturity: bigint
   tickSpacing: number
   continuousFee: number
+  /** The market as Midnight encodes it, which a redemption names. */
+  params: MarketParams
+  /** Credit any lender may withdraw at par from the market now, first come first served. */
+  withdrawable: bigint
+  /**
+   * The maker's credit accrued to the read's expiry, the deadline of any act decided on it: the
+   * continuous fee only lowers credit, so the maker holds at least this much until then unless the
+   * market is slashed meanwhile.
+   */
+  redeemableCredit: bigint
 }>
 
 /**

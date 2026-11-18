@@ -1,4 +1,8 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 
 import type {
@@ -8,9 +12,11 @@ import type {
   JOURNAL_FORMAT,
   JournalEntry,
   Node,
+  ObservedStep,
   Runner,
   RunnerOptions,
   Source,
+  StepObserver,
   Stream
 } from '../src'
 
@@ -30,6 +36,7 @@ import {
   LaneOverflowError,
   latest,
   NotDataError,
+  ObserverReentryError,
   PolicyReentryError,
   ReentrantPushError,
   RequestRefusedError,
@@ -95,6 +102,27 @@ describe('the runner', () => {
     runner.push(books, { offers: ['a'] })
     expect(() => runner.read(books)!.offers.push('b')).toThrow(TypeError)
     expect(runner.read(books)).toStrictEqual({ offers: ['a'] })
+    await runner.abandon()
+  })
+
+  it('holds what an operator writes as the operator wrote it, so it can know the value again by reference', async () => {
+    const g = createGraph('reference')
+    const source = g.occurrences<number>('source')
+    const reading = { made: 'by the operator' }
+    const known: boolean[] = []
+    const kept = g.fold('kept', {
+      reads: { n: every(source) },
+      initial: { reading: null as typeof reading | null },
+      applyInput: state => {
+        known.push(state.reading === reading)
+        return { state: { reading } }
+      }
+    })
+    const runner = createRunner(g.build())
+    runner.push(source, 1)
+    runner.push(source, 2)
+    expect(known).toStrictEqual([false, true])
+    expect(runner.read(kept)!.reading).toBe(reading)
     await runner.abandon()
   })
 
@@ -187,16 +215,55 @@ describe('the runner', () => {
     await runner.abandon()
   })
 
-  it('refuses a level write without its basis, and refreshes evidence on an equal write', async () => {
+  it('refuses a level write without its value or its basis, and refreshes evidence on an equal write', async () => {
     const g = createGraph('levels')
     const price = g.level<number>('price')
     const runner = createRunner(g.build())
     expect(() => runner.push(price, { value: 1 } as never)).toThrow(WriteRefusedError)
+    expect(() => runner.push(price, { value: undefined, basis: { block: 9 } } as never)).toThrow(
+      new WriteRefusedError('price', 'a level write carries its value and its basis')
+    )
+    expect(runner.record(price).status).toBe('unwritten')
     runner.push(price, { value: 1, basis: { block: 10 } })
     runner.push(price, { value: 1, basis: { block: 11 } })
     expect(runner.record(price)).toMatchObject({ value: 1, basis: { block: 11 } })
     runner.push(price, { value: 2, basis: { block: 12 } })
     expect(runner.record(price)).toMatchObject({ value: 2, basis: { block: 12 } })
+    await runner.abandon()
+  })
+
+  it.each([
+    ['status', { value: 2, basis: { block: 2 } }, 'failed'],
+    ['expiry', { value: 2, basis: { block: 2 } }, 5],
+    ['reason', { status: 'failed' }, 'the read failed']
+  ] as const)(
+    'refuses a level write whose status, expiry or reason does not survive the journal, and changes nothing (%s)',
+    async (field, write, hidden) => {
+      const g = createGraph('survives')
+      const price = g.level<number>('price')
+      const runner = createRunner(g.build())
+      runner.push(price, { value: 1, basis: { block: 1 } })
+      const before = runner.record(price)
+      const pushed = Object.defineProperty({ ...write }, field, { value: hidden })
+      expect(() => runner.push(price, pushed as never)).toThrow(
+        new WriteRefusedError('price', 'its status, expiry or reason does not survive the journal')
+      )
+      expect(runner.record(price)).toBe(before)
+      await runner.abandon()
+    }
+  )
+
+  it('holds plain data that names a field entries as any other, dropping an undefined field', async () => {
+    const g = createGraph('plain')
+    const notes = g.occurrences<{ entries: Record<string, number | undefined> }>('notes')
+    const kept = g.fold('kept', {
+      reads: { note: every(notes) },
+      initial: { entries: {} },
+      applyInput: (_, { value }) => ({ state: value })
+    })
+    const runner = createRunner(g.build())
+    runner.push(notes, { entries: { a: undefined, b: 1 } })
+    expect(runner.read(kept)).toStrictEqual({ entries: { b: 1 } })
     await runner.abandon()
   })
 
@@ -917,7 +984,7 @@ describe('the journal', () => {
           requests: { hold: every(holds) },
           results,
           handle: (_, context) => {
-            stashed = context as unknown as EffectContext<number>
+            stashed = context
             return new Promise<void>(resolve =>
               context.signal.addEventListener('abort', () => resolve())
             )
@@ -1139,6 +1206,36 @@ describe('the journal', () => {
     expect((error as Error).cause).toBeInstanceOf(JournalIoTimeoutError)
     expect(finalize).not.toHaveBeenCalled()
   })
+
+  it.each([1, 50])(
+    'lets an append that completed while the loop was blocked beat a %i ms deadline',
+    async ioTimeoutMs => {
+      const file = join(await mkdtemp(join(tmpdir(), 'journal-io-')), 'journal')
+      const g = createGraph('blocked-loop-append')
+      const values = g.occurrences<number>('values')
+      const appending = Promise.withResolvers<void>()
+      const runner = createRunner(g.build(), {
+        journal: {
+          sink: {
+            append: async entry => {
+              const written = writeFile(file, encode(entry))
+              appending.resolve()
+              await written
+            },
+            finalize: async () => undefined
+          },
+          capacityBytes: 16_000,
+          ioTimeoutMs
+        }
+      })
+      runner.push(values, 1)
+      await appending.promise
+      const until = Date.now() + 500
+      while (Date.now() < until);
+
+      await expect(runner.abandon()).resolves.toBeUndefined()
+    }
+  )
 
   it('does not overlap finalization with a timed-out append during direct abandon', async () => {
     const g = createGraph('abandon-append-deadline')
@@ -1703,7 +1800,7 @@ describe('an expiry a watched node carries', () => {
       { reads: { last: latest(last) }, compute: ({ last: n }) => ({ n }) },
       {
         expiries: boxed => {
-          if (boxed.n === 1) (boxed as { n: number }).n = 0
+          if (boxed.n === 1) boxed.n = 0
           return []
         }
       }
@@ -1875,6 +1972,22 @@ describe('a lane with a call budget', () => {
     ).toThrow('positive call budget')
   })
 
+  it('refuses a budget whose window never ends', () => {
+    expect(() =>
+      lane('venue', { concurrency: 1, queue: 1, budget: { calls: 1, perMs: Infinity } })
+    ).toThrow('positive call budget')
+  })
+
+  it.each([Infinity, 2 ** 31])(
+    'refuses a clock period of %s ms, which a timer cannot hold',
+    everyMs => {
+      const g = createGraph('clock')
+      expect(() => g.clock('tick', { everyMs, value: now => now })).toThrow(
+        'needs a positive period a timer can hold'
+      )
+    }
+  )
+
   it.each([
     [{ concurrency: 0, queue: 1 }, 'positive concurrency'],
     [{ concurrency: Number.NaN, queue: 1 }, 'positive concurrency'],
@@ -1889,10 +2002,7 @@ describe('a lane with a call budget', () => {
  * bot effect that throws on 13. A failure pushes its origin to `halts`; the winder stops the runner
  * three recovery ticks after it is asked to.
  */
-const recoveringGraph = (
-  windDown: boolean | readonly [] = true,
-  options: { journal?: NonNullable<Parameters<typeof createRunner>[1]>['journal'] } = {}
-) => {
+const recoveringGraph = (windDown: boolean | readonly [] = true, options: RunnerOptions = {}) => {
   const g = createGraph('recovering')
   const halts = g.occurrences<string>('halts')
   const reads = g.occurrences<number>('reads')
@@ -2046,10 +2156,8 @@ describe('a graph with a recovery', () => {
   })
 })
 
-type Journal = NonNullable<RunnerOptions['journal']>
-
 /** A bot fold that fails on a negative read, evaluated before a recovery member that may fail on it too. */
-const rerunGraph = (journal: Journal, failing: 'member' | 'recovery' | 'nothing') => {
+const rerunGraph = (options: RunnerOptions, failing: 'member' | 'recovery' | 'nothing') => {
   const g = createGraph('rerun')
   const reads = g.occurrences<number>('reads')
   g.fold('bot', {
@@ -2079,7 +2187,7 @@ const rerunGraph = (journal: Journal, failing: 'member' | 'recovery' | 'nothing'
     }
   )
   const graph = g.build()
-  const runner = createRunner(graph, { journal })
+  const runner = createRunner(graph, options)
   return {
     graph,
     runner,
@@ -2089,7 +2197,7 @@ const rerunGraph = (journal: Journal, failing: 'member' | 'recovery' | 'nothing'
 }
 
 type Scenario = Readonly<{
-  build: (journal: Journal) => { runner: Runner; fill: () => void; trigger: () => void }
+  build: (options: RunnerOptions) => { runner: Runner; fill: () => void; trigger: () => void }
   stop: (stopped: Promise<unknown>) => Promise<void>
   /** The journal from its first `failed` entry on. */
   journaled: readonly ({ kind: JournalEntry['kind'] } & Record<string, unknown>)[]
@@ -2099,7 +2207,7 @@ const stepOf = (writes: readonly unknown[]) => ({ stamp: expect.any(Object), wri
 
 const scenarios: Record<string, Scenario> = {
   'a step that throws in a graph without a recovery scope': {
-    build: journal => {
+    build: options => {
       const g = createGraph('plain')
       const reads = g.occurrences<number>('reads')
       g.fold('bot', {
@@ -2110,15 +2218,15 @@ const scenarios: Record<string, Scenario> = {
           return { state: n + 1 }
         }
       })
-      const runner = createRunner(g.build(), { journal })
+      const runner = createRunner(g.build(), options)
       return { runner, fill: () => runner.push(reads, 1), trigger: () => runner.push(reads, -1) }
     },
     stop: stopped => expect(stopped).rejects.toThrow('bot failed'),
     journaled: [{ kind: 'failed', origin: 'bot', step: stepOf([{ node: 'reads', value: -1 }]) }]
   },
   'a step that throws inside the recovery scope': {
-    build: journal => {
-      const { runner, reads, halts } = recoveringGraph(true, { journal })
+    build: options => {
+      const { runner, reads, halts } = recoveringGraph(true, options)
       return {
         runner,
         fill: () => runner.push(reads, 1),
@@ -2131,8 +2239,8 @@ const scenarios: Record<string, Scenario> = {
     ]
   },
   'a step that throws outside the recovery scope': {
-    build: journal => {
-      const { runner, reads } = recoveringGraph(true, { journal })
+    build: options => {
+      const { runner, reads } = recoveringGraph(true, options)
       runner.start()
       return { runner, fill: () => runner.push(reads, 1), trigger: () => runner.push(reads, -1) }
     },
@@ -2145,7 +2253,7 @@ const scenarios: Record<string, Scenario> = {
     ]
   },
   'a member that throws during the re-run': {
-    build: journal => rerunGraph(journal, 'member'),
+    build: options => rerunGraph(options, 'member'),
     stop: stopped => expect(stopped).rejects.toThrow('member failed'),
     journaled: [
       { kind: 'failed', origin: 'bot', step: stepOf([{ node: 'reads', value: -1 }]) },
@@ -2154,7 +2262,7 @@ const scenarios: Record<string, Scenario> = {
     ]
   },
   'a recovery callback that throws': {
-    build: journal => rerunGraph(journal, 'recovery'),
+    build: options => rerunGraph(options, 'recovery'),
     stop: stopped => expect(stopped).rejects.toThrow('recovery failed'),
     journaled: [
       { kind: 'failed', origin: 'bot', step: stepOf([{ node: 'reads', value: -1 }]) },
@@ -2164,7 +2272,7 @@ const scenarios: Record<string, Scenario> = {
     ]
   },
   'a route refusal after its step was journaled': {
-    build: journal => {
+    build: options => {
       const g = createGraph('overflow')
       const requests = g.occurrences<number>('requests')
       const noise = g.occurrences<number>('noise')
@@ -2173,7 +2281,7 @@ const scenarios: Record<string, Scenario> = {
         lane: lane('venue', { concurrency: 1, queue: 1 }),
         handle: () => new Promise<void>(() => {})
       })
-      const runner = createRunner(g.build(), { journal })
+      const runner = createRunner(g.build(), options)
       return {
         runner,
         fill: () => runner.push(noise, 1),
@@ -2184,8 +2292,8 @@ const scenarios: Record<string, Scenario> = {
     journaled: [{ kind: 'failed', origin: 'quote' }]
   },
   'an effect that rejects': {
-    build: journal => {
-      const { runner, reads } = recoveringGraph(true, { journal })
+    build: options => {
+      const { runner, reads } = recoveringGraph(true, options)
       runner.start()
       return { runner, fill: () => runner.push(reads, 1), trigger: () => runner.push(reads, 13) }
     },
@@ -2207,11 +2315,13 @@ describe('a failure that stops or degrades the runner', () => {
     async (_, scenario) => {
       const entries: JournalEntry[] = []
       const { runner, trigger } = scenario.build({
-        sink: {
-          append: async entry => void entries.push(entry),
-          finalize: async () => undefined
-        },
-        capacityBytes: 64_000
+        journal: {
+          sink: {
+            append: async entry => void entries.push(entry),
+            finalize: async () => undefined
+          },
+          capacityBytes: 64_000
+        }
       })
       trigger()
       await scenario.stop(runner.stopped)
@@ -2233,9 +2343,11 @@ describe('a failure that stops or degrades the runner', () => {
       const finalize = vi.fn(async () => undefined)
       const appended: JournalEntry[] = []
       const { runner, trigger } = scenario.build({
-        sink: { append: async entry => void appended.push(entry), finalize },
-        capacityBytes,
-        describe: () => 'x'.repeat(capacityBytes)
+        journal: {
+          sink: { append: async entry => void appended.push(entry), finalize },
+          capacityBytes,
+          describe: () => 'x'.repeat(capacityBytes)
+        }
       })
       trigger()
       const outcome = await runner.stopped.catch((caught: unknown) => caught)
@@ -2254,12 +2366,14 @@ describe('a failure that stops or degrades the runner', () => {
     const described: JournalEntry[] = []
     const describing = rerunGraph(
       {
-        sink: {
-          append: async entry => void described.push(entry),
-          finalize: async () => undefined
-        },
-        capacityBytes: 16_000,
-        describe: error => (error instanceof Error ? error.message : 'unknown')
+        journal: {
+          sink: {
+            append: async entry => void described.push(entry),
+            finalize: async () => undefined
+          },
+          capacityBytes: 16_000,
+          describe: error => (error instanceof Error ? error.message : 'unknown')
+        }
       },
       'member'
     )
@@ -2274,13 +2388,15 @@ describe('a failure that stops or degrades the runner', () => {
     const entries: JournalEntry[] = []
     const { graph, runner, fill, trigger } = rerunGraph(
       {
-        sink: {
-          append: async entry => void entries.push(entry),
-          finalize: async () => undefined
-        },
-        capacityBytes: 16_000,
-        describe: () => {
-          throw new Error('describe failed')
+        journal: {
+          sink: {
+            append: async entry => void entries.push(entry),
+            finalize: async () => undefined
+          },
+          capacityBytes: 16_000,
+          describe: () => {
+            throw new Error('describe failed')
+          }
         }
       },
       'member'
@@ -2331,6 +2447,344 @@ describe('a failure that stops or degrades the runner', () => {
     })
     runner.push(reads, 1)
     await expect(runner.stopped).rejects.toMatchObject({ origin: 'work' })
+  })
+})
+
+const CLOCKS = new Set(['ticks', 'bot.ticks'])
+
+/** A journal without the steps only a clock wrote, whose count real timers decide. */
+const untimed = (entries: readonly JournalEntry[]) =>
+  entries.filter(
+    entry =>
+      !(
+        entry.kind === 'step' &&
+        entry.writes.length > 0 &&
+        entry.writes.every(write => CLOCKS.has(write.node))
+      )
+  )
+
+/** Runs a scenario's fill then trigger at a fixed time, returning its journal and how it stopped. */
+const runScenario = async (scenario: Scenario, observe?: StepObserver) => {
+  const entries: JournalEntry[] = []
+  const { runner, fill, trigger } = scenario.build({
+    now: () => 0,
+    journal: {
+      sink: { append: async entry => void entries.push(entry), finalize: async () => undefined },
+      capacityBytes: 64_000
+    },
+    ...(observe && { observe })
+  })
+  fill()
+  trigger()
+  const outcome = await runner.stopped.then(
+    value => ({ value }),
+    (error: unknown) => ({ error })
+  )
+  await sleep(10)
+  return { journal: untimed(entries), outcome, observerFailed: runner.observerFailed }
+}
+
+const busyWait = (ms: number) => {
+  for (const until = performance.now() + ms; performance.now() < until;);
+}
+
+describe('a step observer', () => {
+  it('sees every node before the first step, then each committed step once, as the step left it', async () => {
+    const { g, amounts, total, doubled } = ledgerGraph()
+    g.occurrences<number>('unwritten')
+    const seen: { step: ObservedStep; records: Record<string, unknown> }[] = []
+    const runner = createRunner(g.build(), {
+      now: () => 7,
+      observe: step =>
+        void seen.push({
+          step,
+          records: Object.fromEntries(step.recorded.map(({ node, record }) => [node, record.value]))
+        })
+    })
+    runner.pushAll([sourceWrite(amounts, 1), sourceWrite(amounts, 2)])
+    expect(
+      seen.map(({ step }) => ({ ...step, recorded: step.recorded.map(({ node }) => node) }))
+    ).toStrictEqual([
+      {
+        stamp: { seq: 0, at: 7 },
+        recorded: ['amounts', 'orders', 'total', 'doubled', 'unwritten'],
+        wakes: [],
+        degraded: false
+      },
+      {
+        stamp: { seq: 1, at: 7 },
+        recorded: ['amounts', 'total', 'orders', 'doubled'],
+        wakes: [],
+        degraded: false
+      }
+    ])
+    expect(seen[1]!.records).toStrictEqual({ amounts: 2, total: 3, orders: 3, doubled: 6 })
+    expect(Object.isFrozen(seen[1]!.step)).toBe(true)
+    expect(Object.isFrozen(seen[1]!.step.stamp)).toBe(true)
+    expect(Object.isFrozen(seen[1]!.step.recorded)).toBe(true)
+    expect(seen[1]!.step.recorded.every(entry => Object.isFrozen(entry))).toBe(true)
+    expect(seen[1]!.step.recorded.every(({ record }) => Object.isFrozen(record))).toBe(true)
+    expect(runner.read(total)).toBe(3)
+    expect(runner.read(doubled)).toBe(6)
+    expect(runner.observerFailed).toBe(false)
+    await runner.abandon()
+  })
+
+  it('never sees a step that was rolled back, and sees its re-run as degraded', async () => {
+    const steps: ObservedStep[] = []
+    const { runner, fill, trigger } = rerunGraph(
+      { observe: step => void steps.push(step) },
+      'nothing'
+    )
+    fill()
+    trigger()
+    await expect(runner.stopped).rejects.toBeInstanceOf(GraphFailedError)
+    expect(
+      steps.map(({ stamp, degraded, recorded }) => ({
+        seq: stamp.seq,
+        degraded,
+        recorded: recorded.map(({ node }) => node)
+      }))
+    ).toStrictEqual([
+      { seq: 0, degraded: false, recorded: ['reads', 'bot', 'kernel.member'] },
+      { seq: 1, degraded: false, recorded: ['reads', 'bot', 'kernel.member'] },
+      { seq: 3, degraded: true, recorded: ['reads', 'kernel.member'] }
+    ])
+  })
+
+  const observers: Record<string, () => StepObserver> = {
+    'one that reads every record': () => step => {
+      for (const { record } of step.recorded) void record.value
+    },
+    'a slow one': () => () => busyWait(2)
+  }
+
+  it.each(
+    Object.entries(scenarios).flatMap(([name, scenario]) =>
+      Object.entries(observers).map(([observer, make]) => [name, observer, scenario, make] as const)
+    )
+  )(
+    'leaves every journal entry and the outcome as they are without one, for %s, with %s',
+    async (_, __, scenario, make) => {
+      const without = await runScenario(scenario)
+      const observed = await runScenario(scenario, make())
+      expect(observed.journal).toStrictEqual(without.journal)
+      expect(observed.outcome).toStrictEqual(without.outcome)
+      expect(observed.observerFailed).toBe(false)
+    }
+  )
+
+  type Call = (stashed: EffectContext<number>, runner: Runner) => unknown
+  let watched: Source<number, 'occurrence'> | undefined
+  const reentries: Record<string, Call> = {
+    push: (_, runner) => runner.push(watched!, 100),
+    pushAll: (_, runner) => runner.pushAll([sourceWrite(watched!, 100)]),
+    start: (_, runner) => runner.start(),
+    abandon: (_, runner) => void runner.abandon(),
+    note: stashed => stashed.note('observed'),
+    write: stashed => stashed.write(100),
+    stop: stashed => stashed.stop('observed'),
+    now: stashed => stashed.now(),
+    sample: stashed => (stashed.samples as unknown as { total: () => number }).total()
+  }
+
+  /** A held effect whose context the observer reaches for at the step after the effect started. */
+  const observedGraph = (reenter: (stashed: EffectContext<number>, runner: Runner) => unknown) => {
+    const g = createGraph('observed')
+    const amounts = g.occurrences<number>('amounts')
+    watched = amounts
+    const holds = g.occurrences<number>('holds')
+    const results = g.node<number>('results')
+    const total = g.fold('total', {
+      reads: { amount: every(amounts), result: every(results) },
+      initial: 0,
+      applyInput: (sum, { value }) => ({ state: sum + value })
+    })
+    let stashed: EffectContext<number> | undefined
+    g.effect('hold', {
+      requests: { hold: every(holds) },
+      samples: { total },
+      results,
+      handle: (_, context) => {
+        stashed = context as unknown as EffectContext<number>
+        return new Promise<void>(resolve =>
+          context.signal.addEventListener('abort', () => resolve())
+        )
+      }
+    })
+    const entries: JournalEntry[] = []
+    const seqs: number[] = []
+    const runner: Runner = createRunner(g.build(), {
+      now: () => 0,
+      journal: {
+        sink: { append: async entry => void entries.push(entry), finalize: async () => undefined },
+        capacityBytes: 64_000
+      },
+      observe: step => {
+        seqs.push(step.stamp.seq)
+        return stashed && step.stamp.seq === 2 ? (reenter(stashed, runner) as undefined) : undefined
+      }
+    })
+    runner.push(holds, 1)
+    return { runner, amounts, total, entries, seqs }
+  }
+
+  it.each(Object.keys(reentries))(
+    'refuses, into the observer, a call that would act on the run, and never calls it again: %s',
+    async call => {
+      const refusals: unknown[] = []
+      const { runner, amounts, total, entries, seqs } = observedGraph((stashed, r) => {
+        try {
+          reentries[call]!(stashed, r)
+        } catch (error) {
+          refusals.push(error)
+        }
+      })
+      runner.push(amounts, 1)
+      runner.push(amounts, 2)
+      expect(refusals).toStrictEqual([new ObserverReentryError()])
+      expect(runner.observerFailed).toBe(true)
+      expect(seqs).toStrictEqual([0, 1, 2])
+      expect(runner.read(total)).toBe(3)
+      await sleep(0)
+      expect(entries.map(entry => entry.kind)).toStrictEqual(['step', 'step', 'step'])
+      let settled = false
+      void runner.stopped.finally(() => (settled = true))
+      await sleep(0)
+      expect(settled).toBe(false)
+      await runner.abandon()
+    }
+  )
+
+  it('drops an observer whose returned value calls the runner from its then, though it caught the refusal', async () => {
+    const refusals: unknown[] = []
+    const { runner, amounts, total, seqs } = observedGraph((_, r) => ({
+      // oxlint-disable-next-line unicorn/no-thenable -- the thenable an observer returns is the case under test
+      get then() {
+        try {
+          r.push(amounts, 100)
+        } catch (error) {
+          refusals.push(error)
+        }
+        return undefined
+      }
+    }))
+    runner.push(amounts, 1)
+    runner.push(amounts, 2)
+    expect(refusals).toStrictEqual([new ObserverReentryError()])
+    expect(runner.observerFailed).toBe(true)
+    expect(seqs).toStrictEqual([0, 1, 2])
+    expect(runner.read(total)).toBe(3)
+    await runner.abandon()
+  })
+
+  const failing: Record<string, (step: ObservedStep) => unknown> = {
+    'a throw before the first step': step => {
+      if (step.stamp.seq === 0) throw new Error('observer failed')
+    },
+    'a throw on the first step': step => {
+      if (step.stamp.seq === 1) throw new Error('observer failed')
+    },
+    'a change to its frozen step': step => {
+      if (step.stamp.seq === 1) (step as { degraded: boolean }).degraded = true
+    },
+    'a thrown value whose every read throws': step => {
+      if (step.stamp.seq !== 1) return
+      const refuse = () => {
+        throw new Error('read')
+      }
+      throw new Proxy({}, { get: refuse, getPrototypeOf: refuse, has: refuse })
+    },
+    'a promise, which rejects': async () => {
+      throw new Error('observer failed')
+    },
+    'a promise from another realm, which rejects': () =>
+      runInNewContext('Promise.reject(new Error("observer failed"))') as undefined,
+    'a promise whose then is hidden': () =>
+      // oxlint-disable-next-line unicorn/no-thenable -- the thenable an observer returns is the case under test
+      Object.assign(Promise.resolve(), { then: undefined }) as unknown,
+    'a promise whose value later grows a throwing then': () => {
+      const value = {}
+      const returned = Promise.resolve(value)
+      // oxlint-disable-next-line unicorn/no-thenable -- the thenable an observer returns is the case under test
+      Object.defineProperty(value, 'then', {
+        get: () => {
+          throw new Error('then')
+        }
+      })
+      return returned
+    },
+    'a returned thenable whose then rejects': step =>
+      step.stamp.seq === 1
+        ? {
+            // oxlint-disable-next-line unicorn/no-thenable -- the thenable an observer returns is the case under test
+            then: async () => {
+              throw new Error('then')
+            }
+          }
+        : undefined,
+    'a returned value whose then throws': step =>
+      step.stamp.seq === 1
+        ? {
+            // oxlint-disable-next-line unicorn/no-thenable -- the thenable an observer returns is the case under test
+            get then() {
+              throw new Error('then')
+            }
+          }
+        : undefined
+  }
+  const DROPPED_AT_ONCE = new Set([
+    'a throw before the first step',
+    'a promise, which rejects',
+    'a promise from another realm, which rejects',
+    'a promise whose then is hidden',
+    'a promise whose value later grows a throwing then'
+  ])
+  const OUTSIDE = 'a step that throws outside the recovery scope'
+
+  it.each(Object.entries(failing))(
+    'drops an observer on %s, and the run completes as without one',
+    async (name, fail) => {
+      const without = await runScenario(scenarios[OUTSIDE]!)
+      const rejections: unknown[] = []
+      const onRejection = (reason: unknown) => void rejections.push(reason)
+      process.on('unhandledRejection', onRejection)
+      let calls = 0
+      try {
+        const observed = await runScenario(scenarios[OUTSIDE]!, step => {
+          calls += 1
+          return fail(step) as undefined
+        })
+        expect(observed.journal).toStrictEqual(without.journal)
+        expect(observed.outcome).toStrictEqual(without.outcome)
+        expect(observed.observerFailed).toBe(true)
+      } finally {
+        process.off('unhandledRejection', onRejection)
+      }
+      expect(calls).toBe(DROPPED_AT_ONCE.has(name) ? 1 : 2)
+      expect(rejections).toStrictEqual([])
+    }
+  )
+
+  it('drops an observer that throws in the recovery re-run, and the recovery still winds down', async () => {
+    const without = await runScenario(scenarios[OUTSIDE]!)
+    const degraded: number[] = []
+    const observed = await runScenario(scenarios[OUTSIDE]!, step => {
+      if (!step.degraded) return
+      degraded.push(step.stamp.seq)
+      throw new Error('observer failed')
+    })
+    expect(degraded).toHaveLength(1)
+    expect(observed.journal).toStrictEqual(without.journal)
+    expect(observed.outcome).toStrictEqual(without.outcome)
+    expect(observed.observerFailed).toBe(true)
+  })
+
+  it('refuses an observer that is not a function', () => {
+    const graph = createGraph('observer').build()
+    expect(() => createRunner(graph, { observe: 'log' as unknown as StepObserver })).toThrow(
+      new GraphDefinitionError('an observer must be a function')
+    )
   })
 })
 

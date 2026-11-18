@@ -36,7 +36,7 @@ function market(midnight: Address = MIDNIGHT): Market {
   return {
     chainId: 8453n,
     midnight,
-    loanToken: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address,
+    loanToken: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     collateralParams: [
       {
         token: '0x4200000000000000000000000000000000000006' as Address,
@@ -56,7 +56,7 @@ function offer(maxUnits: bigint): Offer {
   return {
     market: market(),
     buy: true,
-    maker: '0x1111111111111111111111111111111111111111' as Address,
+    maker: '0x1111111111111111111111111111111111111111',
     start: 1_799_999_700n,
     expiry: 1_800_604_800n,
     tick: 12n,
@@ -64,7 +64,7 @@ function offer(maxUnits: bigint): Offer {
     callback: zeroAddress,
     callbackData: '0x',
     receiverIfMakerIsSeller: zeroAddress,
-    ratifier: '0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E' as Address,
+    ratifier: '0xd6e70365C8E8DDa9a4ca662C07bbE663b017755E',
     reduceOnly: false,
     maxUnits,
     maxAssets: 0n,

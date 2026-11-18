@@ -85,13 +85,17 @@ export const stopAnvil = async (handle: AnvilHandle | undefined) => {
  * Starts an Anvil node forked from a pinned historical Base block.
  *
  * @param port - Loopback port reserved for this suite.
+ * @param forkBlock - The historical Base block the fork starts from.
  * @returns The running process, its Viem client, and its local JSON-RPC URL.
  * @throws {@link AnvilStartupError} When the archive RPC is absent, Anvil exits early, or JSON-RPC
  * readiness times out.
  * @remarks Requires `anvil` on `PATH` and an archive-capable `RPC_URL_8453`. The caller must pass
  * the result to {@link stopAnvil}.
  */
-export const startAnvil = async (port = DEFAULT_ANVIL_PORT): Promise<AnvilHandle> => {
+export const startAnvil = async (
+  port = DEFAULT_ANVIL_PORT,
+  forkBlock = BASE_FORK_BLOCK
+): Promise<AnvilHandle> => {
   const forkUrl = requireForkUrl()
   const child = spawn(
     'anvil',
@@ -99,7 +103,7 @@ export const startAnvil = async (port = DEFAULT_ANVIL_PORT): Promise<AnvilHandle
       '--fork-url',
       forkUrl,
       '--fork-block-number',
-      String(BASE_FORK_BLOCK),
+      String(forkBlock),
       '--host',
       '127.0.0.1',
       '--port',

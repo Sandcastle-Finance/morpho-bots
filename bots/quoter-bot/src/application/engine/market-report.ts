@@ -34,6 +34,8 @@ export type Classification = Readonly<
     condition?: string
     /** Router minimum offer size in raw loan assets, for a `below-minimum-offer` withholding. */
     minimumAssets?: string
+    /** Credit units a redemption withdraws at par. */
+    redeemedUnits?: bigint
   } & Partial<LendHalt>
 >
 
@@ -63,7 +65,7 @@ export type BootstrapFacts = Readonly<{
 
 /** The operation of one transaction an act included. */
 export type SettledTransaction = Readonly<{
-  operation: 'cancel' | 'ratify' | 'publish'
+  operation: 'cancel' | 'ratify' | 'publish' | 'redeem'
   txHash: Hex
 }>
 
@@ -110,26 +112,33 @@ export const unavailableReport = (
 
 /**
  * The operation of each transaction an act included, from its planned step: a replacement's plan is
- * its cancellation, if any, then the publication's ratification and publication, as `quoterPlans`
- * builds it.
+ * its cancellation, if any, then the publication's ratification and publication, and a redemption's
+ * is its withdrawal, as `quoterSteps` builds them.
  */
 const settledTransactions = (outcome: Outcome): readonly SettledTransaction[] => {
   const cancels = ((outcome.payload as { cancel?: readonly string[] }).cancel?.length ?? 0) > 0
   const publication = cancels ? 1 : 0
   return outcome.transactions.map(transaction => ({
     operation:
-      outcome.kind !== 'replace' || transaction.step < publication
-        ? 'cancel'
-        : transaction.step === publication
-          ? 'ratify'
-          : 'publish',
+      outcome.kind === 'redeem'
+        ? 'redeem'
+        : outcome.kind !== 'replace' || transaction.step < publication
+          ? 'cancel'
+          : transaction.step === publication
+            ? 'ratify'
+            : 'publish',
     txHash: transaction.hash as Hex
   }))
 }
 
+/** The action of an act whose market superseded it, which never speaks for the market. */
+export const SUPERSEDED = 'superseded'
+
 /**
  * The report of an ended act. A settled act reports what its payload carried, as applied (logged
- * in a dry run) unless it withdrew a failed market, and one that did not settle failed at `act`.
+ * in a dry run) unless it withdrew a failed market. One that did not settle failed at `act`, or at
+ * `redeem` for a redemption, which leaves no quote stale, since another lender may withdraw first;
+ * unless its market superseded it, which is only observed.
  * @param outcome - The ended act's outcome from the kernel.
  * @param market - The act's workflow, market, and whether the run is dry.
  * @param current - The market's current decision report, whose facts describe it after the act.
@@ -147,11 +156,18 @@ export const outcomeReport = (
     ...(current?.facts ? { facts: current.facts } : {}),
     ...(transactions.length > 0 ? { transactions } : {})
   } as Pick<MarketReport, 'workflow' | 'marketId' | 'facts' | 'transactions'>
+  if (outcome.notice !== 'settled' && outcome.supersededBy !== undefined)
+    return {
+      ...base,
+      status: 'observed',
+      action: SUPERSEDED,
+      reason: outcome.notice
+    } as MarketReport
   if (outcome.notice !== 'settled')
     return {
       ...base,
       status: 'failed',
-      stage: 'act',
+      stage: outcome.kind === 'redeem' ? 'redeem' : 'act',
       invalidated: false,
       errorName: 'KernelPlanError',
       reason: outcome.notice

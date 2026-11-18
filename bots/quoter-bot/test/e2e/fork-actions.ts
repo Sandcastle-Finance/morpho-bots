@@ -431,10 +431,11 @@ export const publishCollateralizedTree = async (anvil: AnvilHandle, tree: Tree) 
   if ((await wallet.waitForTransactionReceipt({ hash: supplyHash })).status !== 'success') {
     throw new TypeError('Fixture maker collateral supply reverted')
   }
-  const typedData = EcrecoverRatifierUtils.typedData({ tree, chainId: base.id })
-  const signature = await maker.signTypedData(
-    typedData as Parameters<typeof maker.signTypedData>[0]
-  )
+  const typedData: Parameters<typeof maker.signTypedData>[0] = EcrecoverRatifierUtils.typedData({
+    tree,
+    chainId: base.id
+  })
+  const signature = await maker.signTypedData(typedData)
   const items = await EcrecoverRatifierUtils.ratify({ tree, account: maker.address, signature })
   const hash = await wallet.sendTransaction({
     to: getChainAddress(base.id, 'midnightMempool'),

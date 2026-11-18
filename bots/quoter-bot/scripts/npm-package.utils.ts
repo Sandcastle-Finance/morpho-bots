@@ -4,7 +4,7 @@ import { NpmPackFailedError } from './errors'
 export const NPM_PACKAGE_NAME = '@morpho-org/quoter'
 
 /** Command name the published package installs on the consumer's PATH. */
-export const NPM_BIN_NAME = 'morpho-quoter'
+const NPM_BIN_NAME = 'morpho-quoter'
 
 /** Bundle filename inside the staged package; the manifest's only shipped code file. */
 export const NPM_BUNDLE_FILENAME = `${NPM_BIN_NAME}.js`

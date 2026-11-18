@@ -8,7 +8,7 @@ import type {
   ReportCommand,
   SendStatus
 } from '@repo/kernel'
-import type { Hex, LocalAccount } from 'viem'
+import type { Hex } from 'viem'
 
 import { intentIdOf, runIdAt, withdrawal } from '@repo/controller'
 import {
@@ -17,7 +17,12 @@ import {
   DEFAULT_JOURNAL_IO_TIMEOUT_MS,
   GraphFailedError
 } from '@repo/engine'
-import { createJournalFileSink, type JournalBuildIdentity, type JournalRunCap } from '@repo/kit'
+import {
+  createJournalFileSink,
+  type JournalBuildIdentity,
+  type JournalRunCap,
+  type Logger
+} from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 import { midnightCancellation, midnightCommitmentGroup } from '@repo/validators'
 import { join } from 'node:path'
@@ -33,6 +38,7 @@ import type { ActEvent } from './infrastructure/engine/quoter-acts'
 import type { WorldReads } from './infrastructure/engine/world-reads'
 import type { QuoterOwnership } from './infrastructure/kernel/quoter-holdings'
 import type { LadderAdapters } from './infrastructure/ladder/production-ladder'
+import type { ReadClient, ReadClients } from './infrastructure/provider/read-clients'
 import type { ReferenceRates } from './infrastructure/reference/reference-rates'
 import type { QuoterReports, WriteFailure } from './report'
 
@@ -59,7 +65,13 @@ import { createQuoterOwnership } from './infrastructure/kernel/quoter-holdings'
 import { createProductionLadderAdapters } from './infrastructure/ladder/production-ladder'
 import { productionReferenceRates } from './infrastructure/reference/reference-rates'
 import { strategyStateDirectory } from './infrastructure/strategy-state/strategy-state-file.utils'
-import { createKernelLog, dryHosting, followedChain, quoterKernelSpec } from './kernel'
+import {
+  createKernelLog,
+  dryHosting,
+  followedChain,
+  quoterKernelSpec,
+  type QuoterSigner
+} from './kernel'
 import { createQuoterReporter } from './report'
 
 /** What a run's kernel reported when it stopped, and whether a halt or a failed step stopped it. */
@@ -142,7 +154,7 @@ const stopOf = (report: ReportCommand): QuoterStop => ({
 /** The preparation for the strategies that have markets, unless a test replaces it. */
 const adaptersFor = (
   config: ConfigService,
-  context: Readonly<{ reads: WorldReads }>,
+  context: Readonly<{ reads: WorldReads; client: ReadClient }>,
   markets: Readonly<{ ladder: number; bootstrap: number }>,
   overrides?: Readonly<{ ladder?: () => LadderAdapters; bootstrap?: () => BootstrapAdapters }>
 ) => ({
@@ -160,8 +172,10 @@ export type JournalSettings = Readonly<{ build: JournalBuildIdentity; runCapByte
 /** The parameters a run of the quoter starts from. */
 type EngineParameters = Readonly<{
   config: ConfigService
+  /** The process's shared read clients. */
+  clients: ReadClients
   strategies: Readonly<{ ladder: boolean; bootstrap: boolean }>
-  account?: LocalAccount
+  signer?: QuoterSigner
   setup?: Readonly<{
     create: (ownership: QuoterOwnership) => SetupCheckService
     monitor: boolean
@@ -193,15 +207,17 @@ type EngineParameters = Readonly<{
   now?: () => number
   /** The journal file under the state directory, or a sink that replaces it; finalized if the runner cannot be created. */
   journal: JournalSettings | NonNullable<RunnerOptions['journal']>
+  liveLogger?: Logger
 }>
 
-/** The signer's kernel for a writer, a dry one that signs nothing without an account, or a test's. */
+/** The signer's kernel for a writer, a dry one that signs nothing without a signer, or a test's. */
 const hostingFor = (parameters: EngineParameters, writeEvent: (event: MonitoringEvent) => void) => {
-  const { config } = parameters
-  const live = parameters.account
+  const { config, clients } = parameters
+  const live = parameters.signer
     ? quoterKernelSpec({
         config,
-        account: parameters.account,
+        signer: parameters.signer,
+        client: clients.chain,
         writeEvent,
         ...(parameters.stateDirectory ? { stateDirectory: parameters.stateDirectory } : {})
       })
@@ -210,7 +226,7 @@ const hostingFor = (parameters: EngineParameters, writeEvent: (event: Monitoring
     hosting:
       parameters.kernel ??
       live?.hosting ??
-      dryHosting(config, parameters.dryEntries, writeEvent, followedChain(config)),
+      dryHosting(config, parameters.dryEntries, writeEvent, followedChain(config, clients.chain)),
     signer: live?.signer ?? config.setup.maker,
     dry: live === undefined
   }
@@ -238,13 +254,12 @@ const preparationOf =
       : adapters.bootstrap!.prepareReplacement({ ...(params as object), ...world } as never)
     ).then(
       value => ({ ok: true as const, value }) as PrepareAnswer,
-      (error: unknown) =>
-        ({
-          ok: false,
-          errorName: operatorErrorName(error),
-          ...adapterOperationField(error),
-          ...(isBelowMinimumOfferRejection(error) ? { minimumAssets: error.minimumAssets } : {})
-        }) as PrepareAnswer
+      (error: unknown) => ({
+        ok: false,
+        errorName: operatorErrorName(error),
+        ...adapterOperationField(error),
+        ...(isBelowMinimumOfferRejection(error) ? { minimumAssets: error.minimumAssets } : {})
+      })
     )
 
 /** A one-shot run's end: steady, or failed by an act that ended unsettled, or by a stop. */
@@ -362,9 +377,9 @@ const openGate = async (run: {
 
 /**
  * Runs the quoter on the engine: one graph over every configured market of the selected strategies
- * and the kernel for its signer, or a dry kernel that signs nothing without an account. Startup
+ * and the kernel for its signer, or a dry kernel that signs nothing without a signer. Startup
  * withdraws every commitment an earlier run left, checks readiness, then opens the gate.
- * @param parameters - The configuration and strategies, the signing account (a run without one is
+ * @param parameters - The configuration and strategies, the loaded signer (a run without one is
  * dry and sends nothing), readiness checked once before the gate opens and optionally monitored,
  * the monitoring writer, and which commitments an earlier run left startup withdraws: all of them
  * unless `adopt` says `keep`.
@@ -374,11 +389,11 @@ const openGate = async (run: {
  * stopped first.
  */
 export const startQuoterEngine = async (parameters: EngineParameters): Promise<QuoterEngine> => {
-  const { config } = parameters
+  const { config, clients } = parameters
   const now = parameters.now ?? Date.now
   const ladder = parameters.strategies.ladder ? config.ladder : []
   const bootstrap = parameters.strategies.bootstrap ? config.bootstrap : []
-  const reads = parameters.world ?? createWorldReads(config)
+  const reads = parameters.world ?? createWorldReads(config, clients.chain)
   const writeEvent = (event: MonitoringEvent) => parameters.writeEvent?.(event)
   const { hosting, signer, dry } = hostingFor(parameters, writeEvent)
   const keys = [
@@ -408,7 +423,7 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
   )
   const adapters = adaptersFor(
     config,
-    { reads },
+    { reads, client: clients.chain },
     { ladder: ladder.length, bootstrap: bootstrap.length },
     parameters.adapters
   )
@@ -424,6 +439,7 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
     ladder,
     bootstrap,
     accounting: accountingOf(config),
+    redeemWithdrawable: config.redeemWithdrawable,
     signing: {
       chainId: config.chainId,
       maker: config.setup.maker,
@@ -437,7 +453,7 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
     kernel: hosting,
     dry,
     reads,
-    rates: parameters.references ?? productionReferenceRates(config),
+    rates: parameters.references ?? productionReferenceRates(config, clients.reference),
     prepare: preparationOf(adapters),
     validate: (workflow, tree, payload) =>
       workflow === 'ladder'
@@ -477,6 +493,7 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
     onAdvance: ({ intentId, stage, block }) =>
       writeEvent({ event: 'kernel.advance', intentId, stage, block }),
     onSetup: reporter.onSetup,
+    ...(parameters.liveLogger && { liveLogger: parameters.liveLogger }),
     onEvent: event => {
       if (parameters.until === 'settled') {
         if (event.type === 'steady') settling.steady()
@@ -499,7 +516,9 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
     runCapReached = file.runCapReached
   }
   try {
-    runner = createRunner(g.build(), { now, journal })
+    const built = g.build()
+    graph.live.describe(built)
+    runner = createRunner(built, { now, journal, observe: graph.live.observe })
   } catch (error) {
     const finalized = await tryCatch(
       journal.sink.finalize(
@@ -536,7 +555,10 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
         ? { ...reported(error.stop as ReportCommand), error: error.cause }
         : { outcome: 'unsafe', reason: 'graph failed', error }
   )
-  void stopped.then(report => settling.stopped(report.reason))
+  void stopped.then(report => {
+    graph.live.flush()
+    settling.stopped(report.reason)
+  })
   const stop = () => active.push(graph.kernel.nodes.requests, { type: 'Stop' })
   const fail = async (cause: unknown): Promise<never> => {
     stop()
@@ -569,7 +591,7 @@ export const startQuoterEngine = async (parameters: EngineParameters): Promise<Q
     stopped,
     settled: settling.settled,
     stop,
-    abandon: () => active.abandon(),
+    abandon: () => active.abandon().finally(() => graph.live.flush()),
     kernelState: () => structuredClone(kernelState()),
     steady: () => read(graph.acts.state)?.steady === true,
     refresh: () => active.push(graph.gate, true),

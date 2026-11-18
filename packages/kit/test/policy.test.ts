@@ -5,7 +5,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { Policy, PolicyTx } from '../src/policy'
 
-import { evaluatePolicy, EXECUTOR_SELECTOR, NONCE_FILL_MAX_GAS } from '../src/policy'
+import {
+  evaluatePolicy,
+  EXECUTOR_SELECTOR,
+  NONCE_FILL_MAX_GAS,
+  policyGasLimit
+} from '../src/policy'
 
 const EXECUTOR = getAddress(`0x${'22'.repeat(20)}`)
 const OTHER = getAddress(`0x${'33'.repeat(20)}`)
@@ -160,11 +165,6 @@ describe('evaluatePolicy', () => {
     }
   )
 
-  it('defaults to zero value and exec_606BaXt', () => {
-    expect(evaluatePolicy(POLICY, tx({ value: 1n }))).toMatchObject({ check: 'value' })
-    expect(evaluatePolicy(POLICY, tx({ data: '0xdeadbeef' }))).toMatchObject({ check: 'selector' })
-  })
-
   describe('nonce fill', () => {
     const fill = (overrides: Partial<PolicyTx> = {}) =>
       tx({ to: SIGNER, data: '0x', gas: 21_000n, ...overrides })
@@ -221,5 +221,20 @@ describe('evaluatePolicy', () => {
     it('refuses a send to another account under a rules policy', () => {
       expect(evaluatePolicy(ruled, fill({ to: OTHER }))).toMatchObject({ check: 'target' })
     })
+  })
+})
+
+describe('policyGasLimit', () => {
+  it("reads the ceiling of the rule for the target and selector, else the target's raw rule, else the policy's", () => {
+    const ruled: Policy = {
+      ...POLICY,
+      rules: [
+        { target: EXECUTOR, selector: EXECUTOR_SELECTOR, maxGasLimit: 600_000n, maxDataBytes: 64 },
+        { target: EXECUTOR, maxGasLimit: 100_000n, maxDataBytes: 64 }
+      ]
+    }
+    expect(policyGasLimit(ruled, tx())).toBe(600_000n)
+    expect(policyGasLimit(ruled, tx({ data: '0x01' }))).toBe(100_000n)
+    expect(policyGasLimit(POLICY, tx())).toBe(15_000_000n)
   })
 })

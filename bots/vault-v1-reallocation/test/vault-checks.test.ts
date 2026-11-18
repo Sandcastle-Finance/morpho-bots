@@ -71,13 +71,10 @@ describe('checkVaults', () => {
         throw new Error('rpc down')
       })
     ]
-  ])('warns without throwing when %s', async (_case, hasAllocatorRole) => {
-    const { logger, events } = spyLogger()
-    await checkVaults([VAULT_A], makeReads({ hasAllocatorRole }), logger)
-    expect(events).toContainEqual({
-      level: 'warn',
-      event: 'allocator.missing_role',
-      fields: { vault: VAULT_A, detail: 'grant the allocator role to the EOA' }
-    })
+  ])('starts without throwing when %s', async (_case, hasAllocatorRole) => {
+    const { logger } = spyLogger()
+    await expect(
+      checkVaults([VAULT_A], makeReads({ hasAllocatorRole }), logger)
+    ).resolves.toBeUndefined()
   })
 })

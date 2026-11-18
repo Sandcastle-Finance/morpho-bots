@@ -1,15 +1,16 @@
+import type { Hex } from 'viem'
+
 import { Tree, type TreeCreateParams } from '@morpho-org/midnight-sdk'
 import { morphoViemExtension } from '@morpho-org/morpho-sdk'
 import { midnightTreeWitness } from '@repo/validators'
-import { createPublicClient, http, type Hex } from 'viem'
 
 import type { WorldOwnership } from '../../application/engine/world'
 import type { ConfigService } from '../../config/config.service'
 import type { BootstrapOffer } from '../../domain/position-bootstrap'
 import type { WorldReads } from '../engine/world-reads'
+import type { ReadClient } from '../provider/read-clients'
 
 import { prepareBootstrap } from '../../application/engine/bootstrap-preparation'
-import { supportedChain } from '../../config/supported-chains.utils'
 import { remainingBuyAssets } from '../../domain/offer-cap'
 import { BootstrapAdapterError } from '../../errors'
 import { readPreparation } from '../engine/quoter-sources'
@@ -65,20 +66,17 @@ export type BootstrapAdapters = {
 /**
  * Composes the bootstrap's publication preparation over its own fresh read.
  * @param config - Fully validated runtime configuration.
- * @param context - The world reads a preparation makes.
+ * @param context - The world reads a preparation makes, and the process's shared chain read client.
  * @returns The bootstrap's preparation and ratified-payload validation adapters.
  * @remarks No provider request occurs while this function constructs the adapters.
  */
 export const createProductionBootstrapAdapters = (
   config: ConfigService,
-  context: { reads: WorldReads }
+  context: { reads: WorldReads; client: ReadClient }
 ): BootstrapAdapters => {
   const maker = config.identity.maker
-  const midnight = createPublicClient({
-    chain: supportedChain(config.chainId),
-    transport: http(config.rpcUrl, { timeout: config.requestTimeoutMs })
-  })
-    .extend(morphoViemExtension({ supportSignature: true, supportDeployless: true }))
+  const midnight = context.client
+    .extend(morphoViemExtension({ supportSignature: true }))
     .morpho.midnight(config.chainId)
   const apiUrl = `${config.morphoApiBaseUrl}/v0/midnight`
 

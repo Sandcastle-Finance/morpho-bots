@@ -66,8 +66,8 @@ encodes and simulates one liquidation. Around them:
 
 ## Prerequisites
 
-- Node.js `24.22.1` (`nvm use` from the repo root).
-- pnpm `11.11.0` (via corepack), Node `24.22.1`.
+- Node.js `24.22.3` (`nvm use` from the repo root).
+- Bun `1.4.4` (package manager), Node `24.22.3`.
 - A Base RPC URL.
 - A funded liquidator EOA private key.
 - A deployed permissionless Executor contract. If `EXECUTOOOR_ADDRESS` is unset, the bot uses the
@@ -291,7 +291,7 @@ Install dependencies from the repo root:
 
 ```sh
 nvm use
-pnpm install
+bun install
 ```
 
 Discovery hits the public liquidation-candidates API by default, so no local indexer or database is
@@ -301,19 +301,19 @@ needed. Start the bot:
 set -a
 source bots/midnight-liquidation/.env
 set +a
-pnpm --filter @morpho-org/midnight-liquidation run start
+bun run --cwd bots/midnight-liquidation start
 ```
 
 Useful validation commands while developing:
 
 ```sh
-pnpm --filter @morpho-org/midnight-liquidation run typecheck
-pnpm --filter @morpho-org/midnight-liquidation exec vitest run
+bun run --cwd bots/midnight-liquidation typecheck
+bunx vitest run --project midnight-liquidation
 ```
 
 ## Testing
 
-- `pnpm --filter @morpho-org/midnight-liquidation exec vitest run` — unit tests for the sizing planner, the deployless lens,
+- `bunx vitest run --project midnight-liquidation` — unit tests for the sizing planner, the deployless lens,
   discovery (the candidate + markets APIs and their shared retry loop), quoting / venue selection,
   eligibility, the exec encoder against the shared validator (every refusal), the world read and the
   preparation, and scenarios that run the whole graph and its kernel against a fake chain: delisting
@@ -352,7 +352,7 @@ Run from `bots/midnight-liquidation`:
 RPC_URL=https://base-mainnet.example \
 PRIVATE_KEY_LENDER=0x... \
 PRIVATE_KEY_BORROWER=0x... \
-pnpm run seed:positions \
+bun run seed:positions \
   --config ./swap.config.json \
   --pair WETH/USDC \
   --count 10 \
@@ -425,15 +425,15 @@ The bot runs on the AWS tools Kubernetes cluster, one StatefulSet per chain, dep
 from the chart at [`helm/midnight-liquidation`](./helm/midnight-liquidation). The Argo CD
 applications live in morpho-infra:
 
-- `dev-8453` follows `bots` main and is the staging deployment. Its `env` and `replicas` move to a
-  morpho-tools-deployment `values-dev-8453.yaml` before this bot's kernel release lands there.
-- `prd-1` and `prd-8453` take values files from morpho-tools-deployment and render the chart from the
+- `dev-8453` follows `bots` main and is the staging deployment. Its `env` and `replicas` move to
+  the deployment config's `values-dev-8453.yaml` before this bot's kernel release lands there.
+- `prd-1` and `prd-8453` take values files from the deployment config and render the chart from the
   public `morpho-bots` snapshot. Both read one image pin, `image.yaml`, so they move together. The
   platform team owns their `replicas`, the production kill switch, in morpho-infra.
 
 Every push to main publishes `bots/midnight-liquidation:<commit>` to ECR, built with
 `BUILD_REVISION=<commit>`. A `Releases midnight-liq` release's `Image` job adds the tag
-`midnight-liq-<PR#>` to that image. Pin a release tag in morpho-tools-deployment only after its
+`midnight-liq-<PR#>` to that image. Pin a release tag in the deployment config only after its
 release's `Image` job succeeded: a pin to a tag with no image takes the bot offline. Rollback pins an
 earlier image.
 
@@ -505,6 +505,13 @@ total at most three caps and the live file overshoots its cap only by the entrie
 so the journal holds at most about four caps: 4 GiB at the chart's 1 GiB, inside `10Gi`. The ledger
 is never pruned.
 
+Each journal file's header records the run id that names the run's intents, and the settings the
+bot built its graph from, kernel bounds included but never a key or a credential. With the build
+that wrote it, the file alone rebuilds that graph and replays the run (`src/replay.ts`).
+
+To get a run's journal after an incident, ask Platform to follow
+[Copy a run's journal off a bot pod](../../docs/JOURNAL-RETRIEVAL.md).
+
 `KERNEL_ENROLLMENT` is `enrolling` for the first start of an account with no ledger and `enrolled`
 for every start after it. The kernel refuses an enrollment over an existing ledger and an enrolled
 start with none: it logs `kernel.stopped` with `outcome: refused` and the reason, and exits. A
@@ -548,7 +555,7 @@ Mainnet needs the Executor deployed once before its release can start (startup a
 code):
 
 ```sh
-RPC_URL=<mainnet> DEPLOYER_PRIVATE_KEY=0x... pnpm --filter @repo/contracts run deploy:executor
+RPC_URL=<mainnet> DEPLOYER_PRIVATE_KEY=0x... bun run --cwd packages/contracts deploy:executor
 ```
 
 Starting mainnet ahead of any listed market is safe: the whitelist is fail-closed, so the bot idles

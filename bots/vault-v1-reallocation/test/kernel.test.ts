@@ -47,7 +47,7 @@ const guard = { signal: new AbortController().signal, mayAct: () => true }
 /** A node answering only what signing and head reads need, with `gas` as its estimate. */
 const mockRpc = (gas = 100_000n) => {
   const blockTags: unknown[] = []
-  vi.spyOn(globalThis, 'fetch').mockImplementation((async (_url, init) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
     const body = JSON.parse(init?.body as string) as {
       id: number
       method: string
@@ -66,7 +66,7 @@ const mockRpc = (gas = 100_000n) => {
           id: body.id,
           error: { code: MethodNotFoundRpcError.code, message: `unmocked ${body.method}` }
         })
-  }) as typeof fetch)
+  })
   return blockTags
 }
 
@@ -98,6 +98,9 @@ const kernel = () => {
     VAULT_WHITELIST: VAULT,
     KERNEL_STATE_DIR: stateDirectory,
     KERNEL_ENROLLMENT: 'enrolling',
+    JOURNAL_RUN_CAP_BYTES: '1073741824',
+    BUILD_REVISION: '0d58dd8e5',
+    BUILD_IMAGE_TAG: 'test',
     MAX_FEE_GWEI: '250'
   })
   return { ...reallocatorKernel({ config, account, logger }), warnings }

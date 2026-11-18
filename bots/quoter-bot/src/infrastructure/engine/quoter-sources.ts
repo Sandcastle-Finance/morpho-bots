@@ -7,6 +7,7 @@ import type {
   PreparationReading,
   WorldAccounting,
   WorldOwnership,
+  WorldPosition,
   WorldValue
 } from '../../application/engine/world'
 import type { OperatorAdapterErrorClass } from '../../application/monitoring/operator-error-name.utils'
@@ -38,11 +39,17 @@ export type WorldBasis = Readonly<{
 /** A configured market, by strategy. */
 type QuoterMarket = Readonly<{ strategy: 'ladder' | 'bootstrap'; marketId: Hex }>
 
+const failed = (error: unknown): Read<never> => ({
+  ok: false,
+  errorName: operatorErrorName(error),
+  ...adapterOperationField(error)
+})
+
 const read = async <T>(operation: () => Promise<T>): Promise<Read<T>> => {
   try {
     return { ok: true, value: await operation() }
   } catch (error) {
-    return { ok: false, errorName: operatorErrorName(error), ...adapterOperationField(error) }
+    return failed(error)
   }
 }
 
@@ -75,6 +82,21 @@ const readSetOf = (groups: readonly { id: Hex }[], ownership: WorldOwnership) =>
   ])
 ]
 
+/** Every market's position at one block, by market ID: a failed read fails each market's entry. */
+const readPositionsAt = async (
+  reads: WorldReads,
+  block: WorldBlock,
+  { marketIds, redeemBy }: Readonly<{ marketIds: readonly Hex[]; redeemBy: bigint }>
+) => {
+  const settled = await read(() => reads.readPositions(marketIds, block, redeemBy))
+  return marketIds.map((marketId, index): readonly [Hex, Read<WorldPosition>] => {
+    if (!settled.ok) return [marketId, settled]
+    const result = settled.value[index]
+    if (result?.status === 'fulfilled') return [marketId, { ok: true, value: result.value }]
+    return [marketId, failed(result?.reason ?? new LadderAdapterError('position-unavailable'))]
+  })
+}
+
 /** Every group's consumption at one block, by group ID. */
 const readConsumedAt = async (
   reads: WorldReads,
@@ -90,8 +112,9 @@ const readConsumedAt = async (
 
 /**
  * One world read, every chain value pinned to the kernel head `at`: the maker's offer groups and
- * each ladder market's book from the API, then every accounting market's position, the maker's
- * cash, and the consumption of every group it knows of, `ownership`'s included. It vouches for every
+ * each ladder market's book from the API, then every accounting market's position, its credit also
+ * accrued to the read's expiry, which is the deadline of any act decided on it, the maker's cash, and the
+ * consumption of every group it knows of, `ownership`'s included. It vouches for every
  * configured market, each with its own entry; a failed read is a failed value in it, and the head's
  * timestamp rides in the basis, never in a value.
  * @param parameters - The kernel head, read time, ownership, live views, readers, markets,
@@ -121,12 +144,14 @@ export const readWorld = async (parameters: {
     )
   ])
   const readSet = readSetOf(groups.ok ? groups.value : [], ownership)
+  const validForSeconds = BigInt(Math.ceil((parameters.expiry - parameters.readAt) / 1000))
+  const headExpiry = at.timestamp + validForSeconds
+  const wallExpiry = BigInt(Math.ceil(parameters.expiry / 1000))
   const [positions, cash, consumed] = await Promise.all([
-    Promise.all(
-      parameters.accounting.marketIds.map(
-        async marketId => [marketId, await read(() => reads.readPosition(marketId, block))] as const
-      )
-    ),
+    readPositionsAt(reads, block, {
+      marketIds: parameters.accounting.marketIds,
+      redeemBy: headExpiry > wallExpiry ? headExpiry : wallExpiry
+    }),
     read(() => reads.readCash(block)),
     read(() => readConsumedAt(reads, readSet, block, LadderAdapterError))
   ])
@@ -200,7 +225,9 @@ export const readPreparation = async (parameters: {
   })
   if (behind(block.number)) throw new adapterError('head-behind-world')
   const [market, consumed] = await Promise.all([
-    reads.readMarket(marketId, block),
+    reads.readMarket(marketId, block).catch((error: unknown) => {
+      throw asStrategyError(error, adapterError)
+    }),
     readConsumedAt(reads, readSetOf(groups, ownership), block, adapterError).catch(
       (error: unknown) => {
         throw error instanceof adapterError ? error : new adapterError('group-consumption-read')

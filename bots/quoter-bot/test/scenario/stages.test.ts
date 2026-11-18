@@ -1,15 +1,19 @@
 import type { JournalEntry, KeyRecord } from '@repo/engine'
 import type { Block, KernelChain, KernelState, LedgerStore, TxPayload } from '@repo/kernel'
+import type { Logger } from '@repo/kit'
 import type { Address, Hex } from 'viem'
 
 import { MarketUtils, Offer, Tree } from '@morpho-org/midnight-sdk'
 import { getChainAddress } from '@morpho-org/morpho-ts'
-import { createGraph, createRunner, keyRecord } from '@repo/engine'
+import { createGraph, createRunner, describeGraph, keyRecord } from '@repo/engine'
 import { replay } from '@repo/engine/replay'
 import { available, createKernel } from '@repo/kernel'
-import { midnightCommitmentId, midnightTreeWitness } from '@repo/validators'
+import { LIVE_PART_BYTES } from '@repo/kit'
+import { journaledSteps, liveGraph, liveSteps } from '@repo/kit/testing'
+import { midnightCommitmentId, midnightRedemption, midnightTreeWitness } from '@repo/validators'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { zeroAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { WorldOwnership } from '../../src/application/engine/world'
@@ -35,9 +39,11 @@ import { LadderAdapterError } from '../../src/errors'
 import { declareQuoter } from '../../src/graph'
 import { VALID_FOR_READS } from '../../src/infrastructure/engine/quoter-sources'
 import { holdingsOf, liveViewOf } from '../../src/infrastructure/kernel/quoter-holdings'
+import { createReadClients } from '../../src/infrastructure/provider/read-clients'
 import { createReferenceRates } from '../../src/infrastructure/reference/reference-rates'
 import { dryHosting, quoterKernelConfig, quoterReceiptLogs } from '../../src/kernel'
 import { startQuoterEngine } from '../../src/run'
+import { marketParams } from '../application/engine/world.fixtures'
 
 const CHAIN_ID = 8453
 const maker: Address = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A'
@@ -129,7 +135,7 @@ const setterTree = (start: bigint, desired?: LadderQuoteSet) =>
       tick: 6_000n,
       maxUnits: 10n,
       continuousFeeCap: 0n
-    } as Parameters<typeof Offer.create>[0]),
+    }),
     ...(desired?.debtCapable && desired.lower.length > 0
       ? [
           Offer.create({
@@ -144,7 +150,7 @@ const setterTree = (start: bigint, desired?: LadderQuoteSet) =>
             continuousFeeCap: 0n,
             reduceOnly: false,
             receiverIfMakerIsSeller: maker
-          } as Parameters<typeof Offer.create>[0])
+          })
         ]
       : [])
   ])
@@ -249,12 +255,24 @@ const reviver = (_key: string, value: unknown) =>
     ? BigInt((value as { $bigint: string }).$bigint)
     : value
 
-const until = async (done: () => boolean, what: string) => {
-  const deadline = Date.now() + 10_000
+const until = async (done: () => boolean, what: string, timeoutMs = 10_000) => {
+  const deadline = vi.getRealSystemTime() + timeoutMs
   while (!done()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
-    await sleep(5)
+    if (vi.getRealSystemTime() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(5)
+    else await sleep(5)
   }
+}
+
+const scheduled = async <T>(promise: Promise<T>, timeoutMs?: number) => {
+  if (!vi.isFakeTimers()) return promise
+  let settled = false
+  void promise.then(
+    () => (settled = true),
+    () => (settled = true)
+  )
+  await until(() => settled, 'the scheduled operation', timeoutMs)
+  return promise
 }
 
 /** World reads that hang once `held`, until it is released, counting each cash read. */
@@ -266,6 +284,9 @@ const reads = (
     positionsRead?: number
     debt?: bigint
     collateral?: bigint
+    credit?: bigint
+    withdrawable?: bigint
+    maturity?: bigint
   } = {}
 ): WorldReads => ({
   readLatestBlock: async () => ({ number: 1n, hash: `0x${'01'.repeat(32)}`, timestamp: NOW }),
@@ -274,20 +295,26 @@ const reads = (
   },
   readGroups: async () => [],
   readBook: async () => [],
-  readPosition: async id => {
-    await held.gate
-    held.positionsRead = (held.positionsRead ?? 0) + 1
-    return {
-      marketId: id,
-      credit: 0n,
-      debt: held.debt ?? 0n,
-      loanCollateral: { assets: held.collateral ?? 10n, lltv: 1_000_000_000_000_000_000n },
-      lossFactor: 0n,
-      maturity: market.maturity,
-      tickSpacing: 4,
-      continuousFee: 0
-    }
-  },
+  readPositions: async ids =>
+    Promise.allSettled(
+      ids.map(async id => {
+        await held.gate
+        held.positionsRead = (held.positionsRead ?? 0) + 1
+        return {
+          marketId: id,
+          credit: held.credit ?? 0n,
+          debt: held.debt ?? 0n,
+          loanCollateral: { assets: held.collateral ?? 10n, lltv: 1_000_000_000_000_000_000n },
+          lossFactor: 0n,
+          maturity: held.maturity ?? market.maturity,
+          tickSpacing: 4,
+          continuousFee: 0,
+          params: market,
+          withdrawable: held.withdrawable ?? 0n,
+          redeemableCredit: held.credit ?? 0n
+        }
+      })
+    ),
   readCash: async () => {
     held.cashReads = (held.cashReads ?? 0) + 1
     if (held.cashFails) throw new TypeError('fetch failed')
@@ -296,72 +323,53 @@ const reads = (
   readConsumed: async groupIds => groupIds.map(() => 0n)
 })
 
+/** A kernel on `chain` whose signer names each transaction by its nonce and fee level. */
+const heldHosting = (
+  config: ConfigService,
+  chain: HeldChain,
+  store: MemoryStore,
+  simulate: (payload: TxPayload) => boolean = () => true
+): NonNullable<Parameters<typeof startQuoterEngine>[0]['kernel']> => ({
+  config: quoterKernelConfig(config, maker),
+  store,
+  chain,
+  effects: {
+    materialize: () => Promise.reject(new LadderAdapterError('unsupported-ratifier')),
+    simulate: async payload => simulate(payload),
+    signTx: async (payload, { nonce, level, fee }) => {
+      const hash = chain.signed(payload, nonce, level)
+      return {
+        hash,
+        raw: hash,
+        bid: { maxFeePerGas: fee, maxPriorityFeePerGas: fee, gas: 1n }
+      }
+    },
+    signTyped: () => Promise.reject(new LadderAdapterError('unsupported-ratifier')),
+    broadcast: async raw => {
+      chain.sent.push(raw)
+      return 'accepted'
+    },
+    release: () => Promise.reject(new LadderAdapterError('unsupported-ratifier'))
+  },
+  enrollment: store.text === null ? 'enrolling' : 'enrolled',
+  pollMs: 5,
+  effectTimeoutMs: 1_000,
+  reorgDepth: 16,
+  onError: () => {}
+})
+
 /** Every preparation's tree start, shared across restarts so no two quoters prepare one group. */
 let prepared = 0
 
-/** The quoter on a held chain, with a reference the trace moves and a tree per preparation. */
-const quoter = async (
-  overrides: Readonly<{
-    store?: MemoryStore
-    chain?: HeldChain
-    clock?: { at: number }
-    held?: {
-      gate?: Promise<void>
-      cashFails?: boolean
-      referenceFails?: boolean
-      cashReads?: number
-      positionsRead?: number
-      debt?: bigint
-      collateral?: bigint
-    }
-    borrowing?: boolean
-    onEvent?: (event: ActEvent) => void
-    onStartupSent?: (hash: Hex) => void
-    setup?: Parameters<typeof startQuoterEngine>[0]['setup']
-    /** How often the world is polled, in seconds; one by default. */
-    pollSeconds?: number
-    /** Awaited by each preparation before it answers. */
+/** Prepares a Setter tree per call, after `preparing` lets it. */
+const setterPreparation =
+  (
+    borrowing: boolean,
     preparing?: (marketId: Hex) => Promise<void>
-    /** Further ladder markets beside the default one, each a copy of it under another id. */
-    others?: readonly Hex[]
-    references?: ReferenceRates
-  }> = {}
-) => {
-  const ladder = environment.LADDER_MARKETS.replace(
-    '"loopIntervalSeconds":"1"',
-    `"loopIntervalSeconds":"${overrides.pollSeconds ?? 1}"`
-  )
-  const markets = [
-    JSON.parse(ladder)[0],
-    ...(overrides.others ?? []).map(id => ({
-      ...JSON.parse(ladder)[0],
-      marketId: id
-    }))
-  ].map(item =>
-    overrides.borrowing
-      ? { ...item, debt: { maximumDebtUnits: '10', stopBorrowingBeforeMaturitySeconds: '0' } }
-      : item
-  )
-  const config = await ConfigService.load({
-    ...environment,
-    MARKET_IDS: [marketId, ...(overrides.others ?? [])].join(','),
-    LADDER_MARKETS: JSON.stringify(markets)
-  })
-  const chain = overrides.chain ?? new HeldChain()
-  const store = overrides.store ?? new MemoryStore()
-  const clock = overrides.clock ?? { at: Date.now() }
-  let rate = 500n
-  const fixedReferences: ReferenceRates = async markets => {
-    if (overrides.held?.referenceFails) throw new Error('reference unavailable')
-    return markets.map(() => ({
-      ok: true,
-      value: { mode: 'static', rateBps: rate, observationId: 'hour:1' }
-    }))
-  }
-  const references = overrides.references ?? fixedReferences
-  const prepare = vi.fn<LadderAdapters['prepareReplacement']>(async ({ desired, marketId: id }) => {
-    await overrides.preparing?.(id)
-    const tree = setterTree(BigInt(++prepared), overrides.borrowing ? desired : undefined)
+  ): LadderAdapters['prepareReplacement'] =>
+  async ({ desired, marketId: id }) => {
+    await preparing?.(id)
+    const tree = setterTree(BigInt(++prepared), borrowing ? desired : undefined)
     return {
       reconciliation: {
         preparedAtTimestamp: NOW,
@@ -382,7 +390,83 @@ const quoter = async (
         witness: midnightTreeWitness(tree)
       }
     }
+  }
+
+/** The quoter on a held chain, with a reference the trace moves and a tree per preparation. */
+const quoter = async (
+  overrides: Readonly<{
+    store?: MemoryStore
+    chain?: HeldChain
+    clock?: { at: number }
+    held?: {
+      gate?: Promise<void>
+      cashFails?: boolean
+      referenceFails?: boolean
+      cashReads?: number
+      positionsRead?: number
+      debt?: bigint
+      collateral?: bigint
+      credit?: bigint
+      withdrawable?: bigint
+      maturity?: bigint
+    }
+    /** Environment beside the scenario's own. */
+    environment?: Readonly<Record<string, string>>
+    /** Whether a transaction simulates successfully; every one does by default. */
+    simulate?: (payload: TxPayload) => boolean
+    borrowing?: boolean
+    onEvent?: (event: ActEvent) => void
+    onStartupSent?: (hash: Hex) => void
+    setup?: Parameters<typeof startQuoterEngine>[0]['setup']
+    /** How often the world is polled, in seconds; one by default. */
+    pollSeconds?: number
+    /** Awaited by each preparation before it answers. */
+    preparing?: (marketId: Hex) => Promise<void>
+    /** Further ladder markets beside the default one, each a copy of it under another id. */
+    others?: readonly Hex[]
+    references?: ReferenceRates
+    liveLogger?: Logger
+    until?: 'settled'
+    /** Whether the journal fails to finalize, as a full disk would make it. */
+    finalizeFails?: boolean
+  }> = {}
+) => {
+  const ladder = environment.LADDER_MARKETS.replace(
+    '"loopIntervalSeconds":"1"',
+    `"loopIntervalSeconds":"${overrides.pollSeconds ?? 1}"`
+  )
+  const markets = [
+    JSON.parse(ladder)[0],
+    ...(overrides.others ?? []).map(id => ({
+      ...JSON.parse(ladder)[0],
+      marketId: id
+    }))
+  ].map(item =>
+    overrides.borrowing
+      ? { ...item, debt: { maximumDebtUnits: '10', stopBorrowingBeforeMaturitySeconds: '0' } }
+      : item
+  )
+  const config = ConfigService.from({
+    ...environment,
+    ...overrides.environment,
+    MARKET_IDS: [marketId, ...(overrides.others ?? [])].join(','),
+    LADDER_MARKETS: JSON.stringify(markets)
   })
+  const chain = overrides.chain ?? new HeldChain()
+  const store = overrides.store ?? new MemoryStore()
+  const clock = overrides.clock ?? { at: Date.now() }
+  let rate = 500n
+  const fixedReferences: ReferenceRates = async markets => {
+    if (overrides.held?.referenceFails) throw new Error('reference unavailable')
+    return markets.map(() => ({
+      ok: true,
+      value: { mode: 'static', rateBps: rate, observationId: 'hour:1' }
+    }))
+  }
+  const references = overrides.references ?? fixedReferences
+  const prepare = vi.fn<LadderAdapters['prepareReplacement']>(
+    setterPreparation(overrides.borrowing === true, overrides.preparing)
+  )
   const validated = vi.fn(async () => {})
   const notices: { intentId: string; notice: string; reason?: string }[] = []
   const advances: { intentId: string; stage: number; block: number }[] = []
@@ -390,39 +474,18 @@ const quoter = async (
   const setups: MonitoringEvent[] = []
   const engine: QuoterEngine = await startQuoterEngine({
     config,
+    clients: createReadClients(config),
     journal: {
-      sink: { append: async () => {}, finalize: async () => {} },
+      sink: {
+        append: async () => {},
+        finalize: async () => {
+          if (overrides.finalizeFails) throw new Error('the disk is full')
+        }
+      },
       capacityBytes: 100_000_000
     },
     strategies: { ladder: true, bootstrap: false },
-    kernel: {
-      config: quoterKernelConfig(config, maker),
-      store,
-      chain,
-      effects: {
-        materialize: () => Promise.reject(new LadderAdapterError('unsupported-ratifier')),
-        simulate: async () => true,
-        signTx: async (payload, { nonce, level, fee }) => {
-          const hash = chain.signed(payload, nonce, level)
-          return {
-            hash,
-            raw: hash,
-            bid: { maxFeePerGas: fee, maxPriorityFeePerGas: fee, gas: 1n }
-          }
-        },
-        signTyped: () => Promise.reject(new LadderAdapterError('unsupported-ratifier')),
-        broadcast: async raw => {
-          chain.sent.push(raw)
-          return 'accepted'
-        },
-        release: () => Promise.reject(new LadderAdapterError('unsupported-ratifier'))
-      },
-      enrollment: store.text === null ? 'enrolling' : 'enrolled',
-      pollMs: 5,
-      effectTimeoutMs: 1_000,
-      reorgDepth: 16,
-      onError: () => {}
-    },
+    kernel: heldHosting(config, chain, store, overrides.simulate),
     world: reads(overrides.held),
     references,
     adapters: {
@@ -431,6 +494,8 @@ const quoter = async (
     ...(overrides.onEvent && { onEvent: overrides.onEvent }),
     ...(overrides.onStartupSent && { onStartupSent: overrides.onStartupSent }),
     ...(overrides.setup && { setup: overrides.setup }),
+    ...(overrides.liveLogger && { liveLogger: overrides.liveLogger }),
+    ...(overrides.until && { until: overrides.until }),
     writeEvent: event => {
       if (event.event === 'kernel.notice') notices.push(event)
       if (event.event === 'kernel.advance') advances.push(event)
@@ -460,15 +525,35 @@ const quoter = async (
 const noticesOf = (run: Awaited<ReturnType<typeof quoter>>, intentId: string) =>
   run.notices.filter(notice => notice.intentId === intentId).map(notice => notice.notice)
 
-let running: QuoterEngine[] = []
-afterEach(async () => {
-  await Promise.all(running.map(engine => engine.abandon()))
-  running = []
-})
+let running: Pick<QuoterEngine, 'abandon'>[] = []
+const teardown = async () => {
+  try {
+    await scheduled(Promise.all(running.map(engine => engine.abandon())), 5_000)
+  } finally {
+    running = []
+    vi.useRealTimers()
+  }
+}
+afterEach(teardown)
+
+test('restores real timers before a hung teardown reaches the hook deadline', async () => {
+  vi.useFakeTimers()
+  const started = vi.getRealSystemTime()
+  const clock = vi.spyOn(vi, 'getRealSystemTime').mockReturnValue(started)
+  running.push({ abandon: () => new Promise<void>(() => {}) })
+  const cleaning = teardown()
+  clock.mockReturnValue(started + 5_001)
+  try {
+    await expect(cleaning).rejects.toThrow('timed out waiting for the scheduled operation')
+    expect(vi.isFakeTimers()).toBe(false)
+  } finally {
+    clock.mockRestore()
+  }
+}, 6_000)
 
 /** A Setter workflow whose ratification is broadcast and held, not yet included. */
 const ratifying = async (overrides: Parameters<typeof quoter>[0] = {}) => {
-  const run = await quoter(overrides)
+  const run = await scheduled(quoter(overrides))
   running.push(run.engine)
   await until(() => run.chain.sentTo(setter).length === 1, 'the ratification')
   const kernel = () => run.engine.kernelState()!
@@ -504,6 +589,7 @@ describe('a Setter workflow across its stages', () => {
   })
 
   test('advances on fresh evidence after its inclusion outlasts the first stage read', async () => {
+    vi.useFakeTimers()
     const held: { cashReads?: number } = {}
     const run = await ratifying({ held })
     const intentId = run.plan().intentId
@@ -706,6 +792,145 @@ describe('a Setter workflow across its stages', () => {
   }, 20_000)
 })
 
+describe('a redemption of withdrawable credit', () => {
+  const midnight = getChainAddress(CHAIN_ID, 'midnight')
+  const WITHDRAW = midnightRedemption(CHAIN_ID, maker, { market, units: 1n }).data.slice(0, 10)
+
+  test('withdraws the credit at par before quoting, and reads the world again once it lands', async () => {
+    const held = { credit: 40n, withdrawable: 100n, positionsRead: 0 }
+    const run = await quoter({ held, pollSeconds: 3_600 })
+    running.push(run.engine)
+    await until(() => run.chain.sentTo(midnight).length === 1, 'the redemption')
+    const [hash] = run.chain.sentTo(midnight)
+    expect(run.chain.payloads.get(hash!)).toMatchObject(
+      midnightRedemption(CHAIN_ID, maker, { market, units: 40n })
+    )
+    expect(run.prepare).not.toHaveBeenCalled()
+    const plan = Object.values(run.engine.kernelState()!.plans).find(
+      p => p.decision?.kind === 'redeem'
+    )!
+    expect(plan.conflicts?.writes).toStrictEqual(['quoter:book'])
+    expect(plan.evidence?.map(fact => fact.id)).toStrictEqual([`markets.desire/${KEY}`])
+    held.credit = 0n
+    const readBefore = held.positionsRead
+    run.chain.mine()
+    await until(() => held.positionsRead > readBefore, 'a world read once the redemption lands')
+    await until(() => run.prepare.mock.calls.length > 0, 'the quote after the redemption')
+    expect(run.chain.sentTo(midnight)).toHaveLength(1)
+  })
+
+  test('quotes until the next poll after a redemption that reverts, and retries only then', async () => {
+    const reverted: TxPayload[] = []
+    const run = await quoter({
+      held: { credit: 40n, withdrawable: 100n },
+      pollSeconds: 3_600,
+      simulate: payload => {
+        if (!payload.data.startsWith(WITHDRAW)) return true
+        reverted.push(payload)
+        return false
+      }
+    })
+    running.push(run.engine)
+    await until(() => run.prepare.mock.calls.length > 0, 'the quote after the reverted redemption')
+    await until(() => run.chain.sentTo(setter).length === 1, 'the ratification')
+    const attempts = reverted.length
+    expect(attempts).toBeGreaterThan(0)
+    await sleep(200)
+    expect(reverted).toHaveLength(attempts)
+    expect(run.chain.sentTo(midnight)).toHaveLength(0)
+  })
+
+  test('retries a reverting redemption at each poll past maturity, and keeps running', async () => {
+    let reverted = 0
+    const held = { credit: 40n, withdrawable: 100n, maturity: NOW }
+    const run = await quoter({
+      held,
+      simulate: payload => {
+        if (!payload.data.startsWith(WITHDRAW)) return true
+        reverted += 1
+        return false
+      }
+    })
+    running.push(run.engine)
+    for (let poll = 0; poll < 2 * MARKET_FAILURE_BUDGET_CYCLES; poll += 1) {
+      const before = reverted
+      held.credit += 1n
+      run.chain.mine()
+      run.clock.at += A_READ_APART * 3
+      await until(() => reverted > before, 'a retried redemption at the next poll')
+    }
+    run.chain.mine()
+    run.clock.at += A_READ_APART * 3
+    await sleep(200)
+    expect(run.engine.kernelState()?.lifecycle).toEqual({ kind: 'running' })
+    expect(run.stops).toHaveLength(0)
+  })
+
+  test('redeems credit that turned withdrawable mid-publication only once the publication ends', async () => {
+    const held: { credit: bigint; withdrawable: bigint; gate?: Promise<void> } = {
+      credit: 40n,
+      withdrawable: 0n
+    }
+    const run = await ratifying({ held })
+    let release = () => {}
+    held.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    run.chain.mine()
+    await sleep(100)
+    held.withdrawable = 100n
+    held.gate = undefined
+    release()
+    await published(run)
+    await until(() => run.chain.sentTo(midnight).length === 1, 'the redemption after publication')
+    const [publication] = run.chain.sentTo(getChainAddress(CHAIN_ID, 'midnightMempool'))
+    const [redemption] = run.chain.sentTo(midnight)
+    expect(run.chain.sent.indexOf(redemption!)).toBeGreaterThan(
+      run.chain.sent.indexOf(publication!)
+    )
+    expect(run.chain.payloads.get(redemption!)).toMatchObject(
+      midnightRedemption(CHAIN_ID, maker, { market, units: 40n })
+    )
+  })
+
+  test('lets a moved desire supersede its parked publication while credit turns withdrawable', async () => {
+    const held: { credit: bigint; withdrawable: bigint; gate?: Promise<void> } = {
+      credit: 40n,
+      withdrawable: 0n
+    }
+    const run = await ratifying({ held })
+    const ratified = run.plan()
+    let release = () => {}
+    held.gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    run.setRate(800n)
+    run.chain.mine()
+    await sleep(100)
+    held.withdrawable = 100n
+    held.gate = undefined
+    release()
+    await until(
+      () => noticesOf(run, ratified.intentId).includes('compensating'),
+      'the supersession'
+    )
+    const withdrawals = run.chain
+      .sentTo(midnight)
+      .filter(hash => run.chain.payloads.get(hash)!.data.startsWith(WITHDRAW))
+    expect(withdrawals).toHaveLength(0)
+  })
+
+  test('quotes without redeeming while REDEEM_WITHDRAWABLE is false', async () => {
+    const run = await quoter({
+      held: { credit: 40n, withdrawable: 100n },
+      environment: { REDEEM_WITHDRAWABLE: 'false' }
+    })
+    running.push(run.engine)
+    await until(() => run.chain.sentTo(setter).length === 1, 'the ratification')
+    expect(run.chain.sentTo(midnight)).toHaveLength(0)
+  })
+})
+
 describe('a published book', () => {
   /** A market whose tree is ratified and published, with its book live. */
   const live = async (
@@ -745,7 +970,7 @@ describe('a published book', () => {
     const stopped = await run.engine.stopped.finally(() => clearInterval(finality))
     expect(stopped).toMatchObject({
       outcome: 'clean',
-      halt: 'quoter.report failed: Error',
+      halt: 'quoter.report failed',
       error: new Error('the hook failed')
     })
     expect(run.engine.held()).toStrictEqual([])
@@ -853,11 +1078,12 @@ describe('a published book', () => {
   })
 
   test('halts the bot through its monitor once a market fails five polls in a row', async () => {
+    vi.useFakeTimers()
     const clock = { at: Date.now() }
     const ticking = setInterval(() => (clock.at += 100), 100)
-    const run = await quoter({ held: { cashFails: true }, clock })
+    const run = await scheduled(quoter({ held: { cashFails: true }, clock }))
     running.push(run.engine)
-    const stopped = await run.engine.stopped
+    const stopped = await scheduled(run.engine.stopped)
     clearInterval(ticking)
     expect(stopped).toMatchObject({ outcome: 'clean', halt: 'market-failure-budget: ladder' })
   })
@@ -890,14 +1116,11 @@ const groupOf = (plan: KernelState['plans'][string]) =>
   Tree.create(plan.steps[0]!.witness as never).offers[0]!.group
 
 describe('the holdings a sizing decision reads', () => {
-  test('reserve cash for revoking and adopted groups, but never count an adopted one as live', () => {
+  test('reserve cash for revoking and adopted groups, but never count an adopted one as live', async () => {
     const tree = setterTree(9n)
     const offer = tree.offers[0]!
-    const state = createKernel({
-      validators: [],
-      caps: {},
-      maxEvidenceAgeBlocks: 0
-    } as never).initialState()
+    const config = await ConfigService.load(environment)
+    const state = createKernel(quoterKernelConfig(config, maker)).initialState()
     const entry = (
       id: string,
       intentId: string,
@@ -958,7 +1181,10 @@ describe('the holdings a sizing decision reads', () => {
                 lossFactor: 0n,
                 maturity: market.maturity,
                 tickSpacing: 4,
-                continuousFee: 0
+                continuousFee: 0,
+                params: marketParams,
+                withdrawable: 0n,
+                redeemableCredit: 0n
               }
             }
           },
@@ -1393,14 +1619,16 @@ describe('a preparation and the world reads around it', () => {
   })
 
   test('counts no timeout while startup holds the gate', async () => {
+    vi.useFakeTimers()
     const world: { positionsRead?: number } = {}
+    const preparing = vi.fn(() => new Promise<void>(() => {}))
     let ready = () => {}
     const readiness = new Promise<void>(resolve => {
       ready = resolve
     })
     const starting = quoter({
       held: world,
-      preparing: () => new Promise(() => {}),
+      preparing,
       setup: {
         monitor: false,
         create: () =>
@@ -1416,10 +1644,12 @@ describe('a preparation and the world reads around it', () => {
       () => (world.positionsRead ?? 0) > MARKET_FAILURE_BUDGET_CYCLES + 1,
       'more reads before the gate than the failure budget allows'
     )
+    expect(preparing).not.toHaveBeenCalled()
     ready()
-    const run = await starting
+    const run = await scheduled(starting)
     running.push(run.engine)
     await until(() => run.prepare.mock.calls.length === 1, 'the preparation from the gate’s read')
+    expect(preparing).toHaveBeenCalledTimes(1)
   })
 
   test('that hangs never holds a clean stop', async () => {
@@ -1447,6 +1677,7 @@ describe('the decisions of a world read', () => {
           marketIds: config.setup.marketIds,
           v0OfferGroupIds: config.v0OfferGroupIds
         },
+        redeemWithdrawable: true,
         signing: { chainId: CHAIN_ID, maker, signer: maker, ratifier: () => 'setter' },
         kernel: dryHosting(config),
         dry: true,
@@ -1491,6 +1722,24 @@ describe('the decisions of a world read', () => {
 
   const decided = (reports: readonly { report: QuoterReport }[]) =>
     reports.flatMap(({ report }) => (report.type === 'decided' ? report.decided : []))
+
+  test('logs a redemption on a read-only run, and sends nothing', async () => {
+    const run = await declared(reads({ credit: 40n, withdrawable: 100n }))
+    await run.start()
+    const logged = () =>
+      run.reports.flatMap(({ report }) =>
+        report.type === 'outcome' && report.report.status === 'logged' ? [report.report] : []
+      )
+    await until(() => logged().length > 0, 'the logged redemption')
+    expect(logged()[0]).toMatchObject({ workflow: 'ladder', action: 'redeem', redeemedUnits: 40n })
+    await until(() => {
+      const last = decided(run.reports).at(-1)
+      return last !== undefined && last.redeemedUnits === undefined
+    }, 'a decision that quotes after the logged redemption')
+    await sleep(300)
+    expect(logged()).toHaveLength(1)
+    await run.runner.abandon()
+  })
 
   test('knows nothing of a market before its first world read, and reports it unavailable', async () => {
     const held = { gate: new Promise<void>(() => {}) }
@@ -1648,5 +1897,203 @@ describe('borrowing books across cancellation and publication', () => {
     )
     expect(adopted.every(e => e.state === 'retired' || e.state === 'revoking')).toBe(true)
     expect(restarted.engine.kernelState()!.lifecycle.kind).toBe('running')
+  })
+})
+
+type LiveLine = Readonly<{ event: string; fields: Record<string, unknown> }>
+
+/** Records live lines, counting apart those logged while `late` holds. */
+const recording = (late: () => boolean = () => false) => {
+  const lines: LiveLine[] = []
+  let lateLines = 0
+  const log = (event: string, fields: Record<string, unknown> = {}) => {
+    if (!event.startsWith('live.')) return
+    lines.push({ event, fields })
+    if (late()) lateLines++
+  }
+  const logger: Logger = { debug: log, info: log, warn: log, error: log }
+  return { lines, logger, lateLines: () => lateLines }
+}
+
+describe('the live log', () => {
+  test('logs live lines that hold no signed bytes, calldata, key or failure text, rebuild every journaled step, and its journal replays', async () => {
+    const FAILURE = 'the canary group read is down'
+    const config = await ConfigService.load(environment)
+    const chain = new HeldChain()
+    const account = privateKeyToAccount(environment.MAKER_PRIVATE_KEY as Hex)
+    const signed = new Map<string, string>()
+    const calldata: string[] = []
+    const held = heldHosting(config, chain, new MemoryStore())
+    const hosting: typeof held = {
+      ...held,
+      effects: {
+        ...held.effects,
+        signTx: async (payload, bid, guard) => {
+          const tx = await held.effects.signTx(payload, bid, guard)
+          if (tx === 'capped') return tx
+          calldata.push(payload.data)
+          const raw = await account.signTransaction({
+            chainId: CHAIN_ID,
+            type: 'eip1559',
+            to: payload.to as Hex,
+            data: payload.data as Hex,
+            value: payload.value,
+            nonce: bid.nonce,
+            gas: 1_000_000n,
+            maxFeePerGas: tx.bid.maxFeePerGas,
+            maxPriorityFeePerGas: tx.bid.maxPriorityFeePerGas
+          })
+          signed.set(raw, tx.raw)
+          return { ...tx, raw }
+        },
+        broadcast: (raw, guard) => held.effects.broadcast(signed.get(raw) ?? raw, guard)
+      }
+    }
+    let cashFails = true
+    const world: WorldReads = {
+      ...reads(),
+      readCash: async () => {
+        if (cashFails) throw new Error(FAILURE)
+        return { cashBalance: 100n, allowance: 100n }
+      }
+    }
+    const preparation = setterPreparation(false)
+    const { lines, logger } = recording()
+    const declare = () => {
+      const g = createGraph('quoter')
+      const graph = declareQuoter(g, {
+        runId: 'canary',
+        ladder: config.ladder,
+        bootstrap: [],
+        accounting: {
+          maker,
+          marketIds: config.setup.marketIds,
+          v0OfferGroupIds: config.v0OfferGroupIds
+        },
+        redeemWithdrawable: true,
+        signing: { chainId: CHAIN_ID, maker, signer: maker, ratifier: () => 'setter' },
+        kernel: hosting,
+        dry: false,
+        reads: world,
+        rates: async markets =>
+          markets.map(() => ({
+            ok: true,
+            value: { mode: 'static', rateBps: 500n, observationId: 'hour:1' }
+          })),
+        prepare: async (_, params, { ownership }) => ({
+          ok: true,
+          value: await preparation({ ...(params as object), ownership } as never)
+        }),
+        validate: async () => {},
+        timing: { everyMs: 1_000, bootstrapEveryMs: 60_000, receiptTimeoutMs: 900_000 },
+        now: Date.now,
+        liveLogger: logger
+      })
+      return { g, graph }
+    }
+    const { g, graph } = declare()
+    const journal: JournalEntry[] = []
+    const built = g.build()
+    graph.live.describe(built)
+    const runner = createRunner(built, {
+      journal: {
+        sink: { append: async entry => void journal.push(entry), finalize: async () => {} },
+        capacityBytes: 100_000_000
+      },
+      observe: graph.live.observe
+    })
+    const kernel = () => runner.read(graph.kernel.nodes.state)
+    await graph.kernel.start(runner)
+    await until(() => kernel()?.lifecycle.kind === 'running', 'the kernel running')
+    runner.push(graph.gate, true)
+    const reported = () => {
+      const decisions = runner.read(graph.decisions)
+      const fact = decisions && keyRecord(decisions, KEY)
+      return fact?.status === 'present' ? fact.value.decision.detail.status : undefined
+    }
+    await until(() => reported() === 'failed', 'the failed read')
+    cashFails = false
+    await until(() => chain.sentTo(setter).length === 1, 'the ratification')
+    chain.mine()
+    const mempool = getChainAddress(CHAIN_ID, 'midnightMempool')
+    await until(() => chain.sentTo(mempool).length === 1, 'the publication')
+    chain.mine()
+    await until(() => runner.read(graph.acts.state)?.steady === true, 'the published book steady')
+    runner.push(graph.kernel.nodes.requests, { type: 'Stop' })
+    const finality = setInterval(() => {
+      chain.mine()
+      chain.finalize()
+    }, 20)
+    const stopped = await runner.stopped.finally(() => clearInterval(finality))
+    expect(stopped).toMatchObject({ outcome: 'clean' })
+    expect(kernel()?.lifecycle).toMatchObject({ reason: 'stop requested' })
+    graph.live.flush()
+
+    expect(signed.size).toBeGreaterThanOrEqual(2)
+    const text = JSON.stringify(lines)
+    const secrets = [
+      ...[...signed.keys()].map(raw => raw.slice(2)),
+      ...calldata.map(data => data.slice(10, 74)),
+      environment.MAKER_PRIVATE_KEY.slice(2),
+      FAILURE,
+      'stop requested',
+      'reason'
+    ]
+    expect(lines.length).toBeGreaterThan(0)
+    for (const secret of secrets) expect(text).not.toContain(secret)
+
+    const described = liveGraph(lines)
+    const expected = describeGraph(built)
+    expect(described?.nodes.map(node => node.id)).toStrictEqual(expected.nodes.map(node => node.id))
+    expect(described?.effects.map(({ id, samples }) => ({ id, samples }))).toStrictEqual(
+      expected.effects.map(({ id, samples }) => ({ id, samples: samples.map(({ node }) => node) }))
+    )
+    expect(described?.effects.some(effect => effect.samples.includes('kernel.state'))).toBe(true)
+    for (const part of lines.filter(line => line.event === 'live.graph'))
+      expect(Buffer.byteLength(JSON.stringify(part.fields))).toBeLessThanOrEqual(LIVE_PART_BYTES)
+    expect(liveSteps(lines, described)).toStrictEqual(journaledSteps(journal))
+
+    const journaled = JSON.stringify(journal, (_, value: unknown) =>
+      typeof value === 'bigint' ? value.toString() : value
+    )
+    for (const raw of signed.keys()) expect(journaled).toContain(raw.slice(2))
+    const replayed = replay(declare().g.build(), journal)
+    expect(replayed).toMatchObject({ ok: true })
+    expect(replayed.ok && replayed.steps).toBeGreaterThan(20)
+  }, 30_000)
+
+  test.each([false, true])(
+    'drains when the engine is abandoned, though its journal fails to finalize: %s',
+    async finalizeFails => {
+      const { lines, logger } = recording()
+      const run = await ratifying({ liveLogger: logger, until: 'settled', finalizeFails })
+      run.chain.mine()
+      await published(run)
+      await run.engine.settled
+      const before = lines.length
+      running = running.filter(engine => engine !== run.engine)
+      const abandoned = run.engine.abandon()
+      if (finalizeFails)
+        await expect(abandoned).rejects.toThrow('the journal sink refused an entry')
+      else await abandoned
+      expect(lines.length).toBeGreaterThan(before)
+    }
+  )
+
+  test('drains after the engine stops cleanly, once its runner can log nothing more', async () => {
+    let stops: readonly unknown[] = []
+    const { logger, lateLines } = recording(() => stops.length > 0)
+    const run = await ratifying({ liveLogger: logger })
+    stops = run.stops
+    run.chain.mine()
+    await published(run)
+    run.engine.stop()
+    const finality = setInterval(() => {
+      run.chain.mine()
+      run.chain.finalize()
+    }, 20)
+    const stopped = await run.engine.stopped.finally(() => clearInterval(finality))
+    expect(stopped).toMatchObject({ outcome: 'clean' })
+    expect(lateLines()).toBeGreaterThan(0)
   })
 })

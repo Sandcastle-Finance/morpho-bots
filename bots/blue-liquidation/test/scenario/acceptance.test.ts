@@ -4,20 +4,27 @@ import type { Address } from 'viem'
 import { GraphFailedError, keyRecord } from '@repo/engine'
 import { factId } from '@repo/kernel'
 import { FakeChain, MemoryStore } from '@repo/kernel/testing'
-import { createLogger } from '@repo/kit'
+import { readJournalFile, reorgDepthFor } from '@repo/kit'
+import { readFile } from 'node:fs/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { loadConfig } from '../../src/config'
-import { liquidatorAccount, liquidatorKernel } from '../../src/kernel'
+import { liquidatorAccount } from '../../src/kernel'
+import { liquidatorSettings } from '../../src/settings'
 import { borrowerAt, positionKey, startBot, until } from './bot'
 
 type Bot = Awaited<ReturnType<typeof startBot>>
 
+/** Each shutdown replays its bot's whole journal, thousands of steps after a burst. */
+const SHUTDOWN_TIMEOUT_MS = 60_000
+
 const bots: Bot[] = []
 afterEach(async () => {
-  for (const bot of bots.splice(0)) await bot.shutdown()
-})
+  const shutdowns = await Promise.allSettled(bots.splice(0).map(bot => bot.shutdown()))
+  const failed = shutdowns.find(shutdown => shutdown.status === 'rejected')
+  if (failed) throw failed.reason
+}, SHUTDOWN_TIMEOUT_MS)
 
 const started = async (parameters: Parameters<typeof startBot>[0] = {}) => {
   const bot = await startBot(parameters)
@@ -46,34 +53,66 @@ const candidatesOf = (state: KernelState, borrower: Address) =>
 const sentFor = (bot: Bot, borrower: Address) =>
   bot.events('tx.sent').filter(line => line.fields.id === positionKey(borrower))
 
-/** The block windows the live kernel uses on Robinhood's 100ms blocks. */
-const robinhoodWindows = () => {
-  const config = loadConfig({
-    CHAIN_ID: '4663',
-    FINALITY_4663: 'safe',
-    RPC_URL: 'http://localhost:8545',
-    LIQUIDATOR_PRIVATE_KEY: `0x${'1'.repeat(64)}`,
-    MORPHO_API_KEY: 'morpho-key',
-    KERNEL_STATE_DIR: '/nonexistent',
-    KERNEL_ENROLLMENT: 'enrolling',
-    MAX_FEE_GWEI: '250',
-    ZEROX_API_KEY: 'zx-key'
-  })
-  const { live } = liquidatorKernel({
-    config,
-    account: liquidatorAccount(config),
-    logger: createLogger('error', { env: {} })
-  })
-  const { maxSimLagBlocks, maxEvidenceAgeBlocks } = live.config
-  return { maxSimLagBlocks, maxEvidenceAgeBlocks, reorgDepth: live.reorgDepth }
-}
+const PRIVATE_KEY = `0x${'3a'.repeat(32)}` as const
+const MORPHO_API_KEY = 'morpho-canary-key'
 
 describe('the blue liquidator on the engine', () => {
+  it('journals its failure as a code, never its key, an API key or the error text', async () => {
+    const config = loadConfig({
+      CHAIN_ID: '8453',
+      FINALITY_8453: 'safe',
+      RPC_URL: 'http://localhost:8545',
+      LIQUIDATOR_PRIVATE_KEY: PRIVATE_KEY,
+      MORPHO_API_KEY,
+      KERNEL_STATE_DIR: '/nonexistent',
+      KERNEL_ENROLLMENT: 'enrolling',
+      JOURNAL_RUN_CAP_BYTES: '1073741824',
+      BUILD_REVISION: '0d58dd8e5',
+      BUILD_IMAGE_TAG: 'test',
+      MAX_FEE_GWEI: '250',
+      ZEROX_API_KEY: 'zx-key'
+    })
+    const settings = liquidatorSettings(config, {
+      account: liquidatorAccount(config).address,
+      runId: 'canary'
+    })
+    const bot = await started({ settings })
+    const borrower = borrowerAt(1)
+    bot.alive.add(borrower)
+    bot.mining(true)
+    await until(() => sentFor(bot, borrower).length === 1, 'the send')
+    const leak = 'https://canary-rpc.example/v2/rpc-canary-token'
+    bot.world.logError = Object.assign(new Error(leak), {
+      name: leak,
+      constructor: { name: 'canary_secret' }
+    })
+    bot.world.logFailsOn = 'tick.end'
+    await bot.stopped.catch(() => {})
+    await bot.runner.abandon()
+
+    const reads = await Array.fromAsync(readJournalFile(bot.journalPath!))
+    expect(
+      reads.flatMap(read =>
+        read.kind === 'entry' && read.entry.kind === 'failed' ? [read.entry] : []
+      )
+    ).toMatchObject([{ origin: 'liquidations.log', description: 'unknown' }])
+    const journal = (await readFile(bot.journalPath!, 'utf8')).toLowerCase()
+    expect(journal).toContain(settings.account.toLowerCase())
+    expect(journal).not.toContain(PRIVATE_KEY.slice(2))
+    expect(journal).not.toContain(MORPHO_API_KEY)
+    expect(journal).not.toContain('canary-rpc')
+    expect(journal).not.toContain('canary_secret')
+  })
+
   it("starts on Robinhood's windows without a world read per block of its first window", async () => {
     const chain = new FakeChain()
     chain.height = 3_000
     chain.finalityLag = 2_500
-    const bot = await started({ chain, windows: robinhoodWindows() })
+    const bot = await started({
+      chain,
+      chainId: 4663,
+      reorgDepth: reorgDepthFor({ id: 4663 })
+    })
     bot.world.readDelayMs = 20
     await until(() => bot.events('tick.end').length > 0, 'a world read')
     expect(bot.state().lifecycle.kind).toBe('running')
@@ -194,8 +233,7 @@ describe('the blue liquidator on the engine', () => {
     await until(() => bot.events('act.prepare_failed').length > 0, 'the thrown preparation')
     expect(bot.events('act.prepare_failed')[0]?.fields).toMatchObject({
       id: positionKey(a),
-      reason: 'prepare_threw',
-      error: 'Error'
+      reason: 'prepare_threw'
     })
     expect(bot.events('backoff.set')[0]?.fields).toMatchObject({
       id: positionKey(a),
@@ -230,7 +268,7 @@ describe('the blue liquidator on the engine', () => {
       stop: {
         type: 'report',
         outcome: 'clean',
-        reason: 'liquidations.log failed: Error',
+        reason: 'liquidations.log failed',
         open: { entries: [], nonces: [] }
       }
     })
@@ -455,11 +493,11 @@ describe('the blue liquidator on the engine', () => {
   })
 
   it.each([
-    [4, 1, 1_000],
-    [4, 1, 3]
+    [1, 1_000],
+    [1, 3]
   ])(
-    'liquidates a burst against a lens that moves every block: %i reservations, finality %i behind, route for %i a block',
-    async (reservations, finalityLag, routePerBlock) => {
+    'liquidates a burst against a lens that moves every block: finality %i behind, route for %i a block',
+    async (finalityLag, routePerBlock) => {
       const positions = 48
       const chain = new FakeChain()
       chain.finalityLag = finalityLag
@@ -467,7 +505,6 @@ describe('the blue liquidator on the engine', () => {
       const bot = await started({
         chain,
         alive,
-        reservations,
         squeeze: index => index >= routePerBlock
       })
       const firstBlock = chain.height + 1

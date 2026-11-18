@@ -2,12 +2,7 @@ import type { BotLogger } from '@repo/kit'
 import type { LocalAccount } from 'viem'
 
 import { metaMorphoAbi } from '@morpho-org/blue-sdk-viem'
-import {
-  blocksFor,
-  createHttpTransport,
-  DEFAULT_MAX_GAS_LIMIT,
-  transactionKernelSpec
-} from '@repo/kit'
+import { blocksFor, createHttpTransport, transactionKernelSpec } from '@repo/kit'
 import { vaultV1ReallocationValidator } from '@repo/validators'
 import { createPublicClient, getAbiItem, toFunctionSelector } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -38,15 +33,11 @@ export const reallocatorKernel = (options: {
   logger: BotLogger
 }) => {
   const { config, account, logger } = options
-  const maxSpendWei = config.maxFeePerGasWei * DEFAULT_MAX_GAS_LIMIT
   return transactionKernelSpec({
+    settings: config.kernel,
     limits: {
-      chainId: config.chainId,
       targets: config.vaultWhitelist,
       selector: REALLOCATE_SELECTOR,
-      maxFeePerGasWei: config.maxFeePerGasWei,
-      maxSpendWei,
-      maxGasLimit: DEFAULT_MAX_GAS_LIMIT,
       stuckMs: STUCK_MS,
       maxEvidenceAgeBlocks: evidenceAgeBlocks(config)
     },
@@ -59,10 +50,7 @@ export const reallocatorKernel = (options: {
     }),
     rpcUrl: config.rpcUrl,
     rpcUrlFallback: config.rpcUrlFallback,
-    stateDirectory: config.kernel.stateDirectory,
-    enrollment: config.kernel.enrollment,
     effectTimeoutMs: KERNEL_EFFECT_TIMEOUT_MS,
-    finality: config.finality,
     logger
   })
 }

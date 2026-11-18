@@ -1,12 +1,19 @@
 import type { EIP1193RequestFn, PublicRpcSchema, Transport } from 'viem'
 
-import { deployless, failover } from '@morpho-org/viem-dlc/transports'
+import { deployless, failover, rateLimiter } from '@morpho-org/viem-dlc/transports'
 import { http } from 'viem'
 
 import { ethCallGasCap } from './gas-limits'
 
 /** Per-request timeout for every kit HTTP transport (the read client and the signer). */
 const RPC_TIMEOUT_MS = 30_000
+
+/** Per-endpoint read budget, matching prime-monorepo's server clients (`web3.config.server.ts`). */
+const READ_RATE_LIMIT = {
+  maxRequestsPerSecond: 100,
+  maxBurstRequests: 300,
+  maxConcurrentRequests: 100
+}
 
 /**
  * The base HTTP transport kit clients share: a viem-dlc `failover` pair when `fallbackUrl` is
@@ -33,10 +40,11 @@ export function createDeploylessTransport(options: {
   rpcUrl: string
   rpcUrlFallback?: string | undefined
   batchSize?: number | undefined
+  timeoutMs?: number | undefined
 }): Transport<'viem-dlc-deployless'> {
-  const { chainId, rpcUrl, rpcUrlFallback, batchSize } = options
+  const { chainId, rpcUrl, rpcUrlFallback, batchSize, timeoutMs = RPC_TIMEOUT_MS } = options
   const branch = (url: string) =>
-    deployless(http(url, { timeout: RPC_TIMEOUT_MS }), {
+    deployless(rateLimiter(http(url, { timeout: timeoutMs }), [READ_RATE_LIMIT]), {
       gasLimit: ethCallGasCap(chainId, url),
       batchSize
     })

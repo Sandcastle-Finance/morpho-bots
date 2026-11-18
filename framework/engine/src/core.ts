@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 
 import type { Data } from './data'
-import type { Delivery, Graph, Node, NodeSpec, OperatorSpec, Stamp } from './graph'
+import type { Delivery, Graph, Node, NodeSpec, OperatorSpec, Stamp, WriteJudge } from './graph'
 
-import { encode, freezeData } from './data'
+import { encode, encodeFrozen, freezeData, roundTrip } from './data'
 import { CycleBoundError, GraphDefinitionError, WriteRefusedError } from './errors'
 
 /** How many times one step may re-enter any one operator it already evaluated before it fails. */
@@ -27,15 +27,20 @@ export type NodeRecord<T> = Readonly<{
 
 type Written = Omit<NodeRecord<unknown>, 'status'> & { status: Status }
 
-/** A validated write, kept in the form it was pushed so replay can push it again. */
+/** A validated write, held as the journal reads it back so replay can push it again. */
 export type Pending = Readonly<{ node: string; pushed: unknown; written: Written }>
 
 export type DerivedWrite = Readonly<{ node: string; digest: string }>
 
 type Sequenced = Delivery<unknown> & { seq: number }
 
+const digestOfText = (text: string) => createHash('sha256').update(text).digest('hex')
+
 /** The digest of a value's canonical encoding: what decides whether a write changed its node. */
-export const digestOf = (value: unknown) => createHash('sha256').update(encode(value)).digest('hex')
+export const digestOf = (value: unknown) => digestOfText(encode(value))
+
+const digestOfWrite = (written: Written, text: string | undefined) =>
+  written.status === 'present' ? digestOfText(text ?? encode(written.value)) : undefined
 
 const metaOf = (record: NodeRecord<unknown>) =>
   encode({ basis: record.basis, expiry: record.expiry, reason: record.reason })
@@ -44,6 +49,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
 
 const MALFORMED_EXPIRY = 'an expiry is not a safe integer'
+
+/**
+ * `value` as {@link roundTrip} holds it, refused unless the judge its reader gave reads it the same
+ * as pushed and as held.
+ */
+const held = (node: string, value: unknown, judge?: WriteJudge) => {
+  const judged = judge && encode(judge(node, value))
+  const kept = roundTrip(value)
+  if (judge && encode(judge(node, kept)) !== judged)
+    throw new WriteRefusedError(node, 'what its reader acts on does not survive the journal')
+  return kept
+}
 
 const levelWrite = (node: string, pushed: unknown): Written => {
   if (!isRecord(pushed)) throw new WriteRefusedError(node, 'a level write is a record')
@@ -121,12 +138,15 @@ const readerKey = (reader: string, input: string) => `${reader}\u0000${input}`
 /** Operators and effects read through disjoint keys, whatever ids they were declared with. */
 const operatorReader = (id: string) => `op:${id}`
 
+/** Observes each write as it is recorded; `producer` is the operator that derived it, if one did. */
+type OnWrite = (node: string, record: NodeRecord<unknown>, producer: string | undefined) => void
+
 /**
  * The graph's nodes and one step of propagation. A step applies its writes and evaluates every
  * operator they schedule, in evaluation order, until none is scheduled; it commits all of it or,
  * when anything throws, none of it.
  */
-export const createCore = (graph: Graph) => {
+export const createCore = (graph: Graph, onWrite: OnWrite = () => undefined) => {
   const records = new Map<string, NodeRecord<unknown>>()
   const buffers = new Map<string, Sequenced[]>()
   const readers = new Map<
@@ -200,27 +220,27 @@ export const createCore = (graph: Graph) => {
     else expiries.delete(node)
   }
 
-  const write = (node: string, written: Written, derived: boolean) => {
+  const write = (node: string, written: Written, producer?: string) => {
     const spec = graph[layout].nodes.get(node)!
     const before = records.get(node)!
-    const value = written.value === undefined ? undefined : freezeData(written.value)
+    const text = written.value === undefined ? undefined : encodeFrozen(written.value)
+    const value = written.value as Data | undefined
     const found = expiriesOf(spec, written, value)
-    const digest = written.status === 'present' ? digestOf(written.value) : undefined
+    const digest = digestOfWrite(written, text)
     const changed = written.status !== before.status || digest !== before.digest
     const metaChanged = metaOf(written) !== metaOf(before)
     if (spec.coalesces && !changed && !metaChanged) return
-    records.set(
-      node,
-      Object.freeze({
-        ...written,
-        ...(value !== undefined && { value }),
-        ...(digest !== undefined && { digest })
-      })
-    )
+    const record = Object.freeze({
+      ...written,
+      ...(value !== undefined && { value }),
+      ...(digest !== undefined && { digest })
+    })
+    records.set(node, record)
     const seq = ++writeSeq
     lastWrite.set(node, seq)
     presented(node, found)
-    if (derived) step!.derived.push({ node, digest: digest ?? written.status })
+    if (producer !== undefined) step!.derived.push({ node, digest: digest ?? written.status })
+    onWrite(node, record, producer)
     const becamePresent = written.status === 'present' && !readable(before)
     for (const reader of readers.get(node) ?? []) {
       if (reader.mode === 'every') buffers.get(reader.key)!.push({ value, stamp: step!.stamp, seq })
@@ -262,14 +282,14 @@ export const createCore = (graph: Graph) => {
       if (readable(record)) inputs[name] = record.value
       else blocked = blocked === 'failed' || record.status === 'failed' ? 'failed' : 'unknown'
     }
-    if (blocked) return write(op.output, { status: blocked }, true)
+    if (blocked) return write(op.output, { status: blocked }, op.id)
     for (const [name, edge] of Object.entries(op.reads))
       if (edge.mode === 'every')
         inputs[name] = take(operatorReader(op.id), [name]).map(({ value, stamp }) => ({
           value,
           stamp
         }))
-    write(op.output, { status: 'present', value: op.compute(inputs) }, true)
+    write(op.output, { status: 'present', value: op.compute(inputs) }, op.id)
   }
 
   /** Each watched node written since `reader` last ran: its current record, at its last write. */
@@ -304,46 +324,59 @@ export const createCore = (graph: Graph) => {
       state = after.state
       emitted.push(...(after.emit ?? []))
     }
-    write(op.output, { status: 'present', value: state }, true)
+    write(op.output, { status: 'present', value: state }, op.id)
     for (const { node, value } of emitted) {
       if (!op.emits.includes(node.id))
         throw new GraphDefinitionError(`${op.id} emitted to ${node.id}, which it does not own`)
-      write(node.id, { status: 'present', value }, true)
+      graph[layout].nodes.get(node.id)?.judge?.(node.id, value)
+      write(node.id, { status: 'present', value }, op.id)
     }
   }
 
   /**
-   * Validates a push before it is queued, so a refused write never reaches a step, and freezes it,
-   * so neither its evidence nor its journaled form changes after it is accepted.
+   * Validates a push before it is queued, and refuses one the journal would not carry as pushed: a
+   * level write's status, expiry or reason, or what its reader's judge acts on.
    */
   const accept = (node: string, pushed: unknown): Pending => {
     const spec: NodeSpec | undefined = graph[layout].nodes.get(node)
     if (!spec) throw new WriteRefusedError(node, `it is not a node of ${graph.id}`)
     if (spec.kind !== 'level' && spec.kind !== 'occurrence')
       throw new WriteRefusedError(node, 'only its producer writes it')
-    const written = spec.kind === 'level' ? levelWrite(node, pushed) : undefined
-    const frozen = freezeData(pushed)
-    return { node, pushed: frozen, written: written ?? { status: 'present', value: frozen } }
+    const judged = spec.kind === 'level' ? levelWrite(node, pushed) : undefined
+    const value = held(node, pushed, spec.judge)
+    if (!judged) return { node, pushed: value, written: { status: 'present', value } }
+    const written = levelWrite(node, value)
+    if ((['status', 'expiry', 'reason'] as const).some(field => written[field] !== judged[field]))
+      throw new WriteRefusedError(node, 'its status, expiry or reason does not survive the journal')
+    return { node, pushed: value, written }
   }
 
   /** A write the runtime makes for a producer it owns: a clock or an effect's results. */
-  const produced = (node: string, value: unknown): Pending => {
-    const frozen = freezeData(value)
-    return { node, pushed: frozen, written: { status: 'present', value: frozen } }
+  const produced = (node: string, output: unknown): Pending => {
+    const value = held(node, output, graph[layout].nodes.get(node)?.judge)
+    return { node, pushed: value, written: { status: 'present', value } }
   }
 
-  /** Runs one step: `wakes` names nodes whose watchers see them again, as {@link due} found them. */
+  /**
+   * Runs one step: `wakes` names nodes whose watchers see them again, as {@link due} found them.
+   * Readers get `stamp` frozen, with its fields in the order a journal reads them back.
+   */
   const run = (writes: readonly Pending[], stamp: Stamp, wakes: readonly string[] = []) => {
     const restorable = [records, buffers, lastWrite, watched, expiries] as Map<string, unknown>[]
     const saved = restorable.map(map =>
       [...map].map(([key, value]) => [key, Array.isArray(value) ? [...value] : value] as const)
     )
     const savedSeq = writeSeq
-    step = { stamp, dirty: new Set(), reentries: new Map(), derived: [] }
+    step = {
+      stamp: Object.freeze({ at: stamp.at, seq: stamp.seq }),
+      dirty: new Set(),
+      reentries: new Map(),
+      derived: []
+    }
     failedOperator = undefined
     try {
       for (const node of wakes) wake(node)
-      for (const pending of writes) write(pending.node, pending.written, false)
+      for (const pending of writes) write(pending.node, pending.written)
       while (step.dirty.size > 0) {
         const op = graph[layout].operators.find(candidate => step!.dirty.has(candidate))!
         failedOperator = op.id

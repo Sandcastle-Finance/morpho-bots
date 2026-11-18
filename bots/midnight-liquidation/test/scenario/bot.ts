@@ -1,29 +1,37 @@
-import type { Budget, Keyed, RunnerOptions } from '@repo/engine'
-import type { KernelConfig, TxPayload } from '@repo/kernel'
+import type { Budget, JournalEntry, Keyed, RunnerOptions } from '@repo/engine'
+import type { TxPayload } from '@repo/kernel'
 import type { Logger } from '@repo/kit'
 import type { PairCurve, QuoteOutcome, SwapPlan } from '@repo/swaps'
 import type { Address, Hex } from 'viem'
 
 import { Executor, MidnightAbi } from '@repo/contracts'
+import { decode, encode } from '@repo/engine'
+import { createReplayer, replay } from '@repo/engine/replay'
 import { FakeChain, MemoryStore } from '@repo/kernel/testing'
-import { blocksFor, transactionKernelConfig } from '@repo/kit'
+import { blocksFor, createJournalFileSink, readJournalFile } from '@repo/kit'
 import { MAX_COST_LEVEL_AGE_MS, venuePairKey } from '@repo/swaps'
 import { lensKey } from '@repo/utils'
-import { executorLiquidationValidator } from '@repo/validators'
-import { decodeFunctionData, getAddress, pad, zeroAddress } from 'viem'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { decodeFunctionData, getAddress, isAddressEqual, pad, zeroAddress } from 'viem'
 import { base } from 'viem/chains'
 
 import type { WhitelistSource } from '../../src/discovery/markets'
 import type { Market } from '../../src/execution/encode-call'
 import type { Pricing, Readings } from '../../src/liquidation'
+import type { LiquidatorSettings } from '../../src/settings'
 import type { LiquidationPlan } from '../../src/sizing/plan'
 import type { LensOut } from '../../src/state/lens.sol'
 
+import { STUCK_MS } from '../../src/config'
 import { ORACLE_PRICE_SCALE, WAD } from '../../src/constants'
-import { encodeLiquidationExec } from '../../src/execution/encode-call'
+import { LIQUIDATOR_GRAPH } from '../../src/graph'
 import { routeKeyOf } from '../../src/liquidation'
+import { replayGraph } from '../../src/replay'
 import { startLiquidator } from '../../src/run'
 import { createPlanSkipLog } from '../../src/runner/plan-skip-log'
+import { parseLiquidatorSettings } from '../../src/settings'
 import { createTickStats } from '../../src/stats'
 
 export const EXECUTOR = getAddress('0x1111111111111111111111111111111111111111')
@@ -35,8 +43,8 @@ export const LOAN = getAddress('0x6666666666666666666666666666666666666666')
 export const NATIVE = getAddress('0x7777777777777777777777777777777777777777')
 const BLOCK_MS = 40
 const MARKETS_REFRESH_MS = 50
-const MAX_SPEND_WEI = 10n ** 16n
-const STUCK_MS = 10_000
+const JOURNAL_CAPACITY_BYTES = 10_000_000
+const JOURNAL_RUN_CAP_BYTES = 2 ** 40
 /** How many blocks a sent transaction waits for inclusion before the kernel re-bids its nonce. */
 export const STUCK_BLOCKS = blocksFor(STUCK_MS, base)
 const LLTV = 860000000000000000n
@@ -186,8 +194,8 @@ export const outAt = (position: Position, timestamp: bigint, maturity: bigint): 
 const swap: SwapPlan = { steps: [], expectedAmountOut: 10n ** 30n, amountOutMinimum: 1n }
 
 /** The position and slot a mined Executor call liquidates. */
-const liquidated = (payload: TxPayload) => {
-  if (payload.to !== EXECUTOR) return undefined
+const liquidated = (payload: TxPayload, executor: Address) => {
+  if (!isAddressEqual(payload.to as Address, executor)) return undefined
   const exec = decodeFunctionData({ abi: Executor.abi, data: payload.data as Hex })
   const [first] = (exec.args as readonly [readonly Hex[]])[0]
   const call = decodeFunctionData({ abi: Executor.abi, data: first! })
@@ -216,24 +224,32 @@ const recordingLogger = (lines: Line[], failsOn: () => string | undefined): Logg
   return { debug: log, info: log, warn: log, error: log }
 }
 
-const kernelConfig = (reservations: number): KernelConfig => {
-  const config = transactionKernelConfig(
-    {
-      chainId: 8453,
-      targets: [EXECUTOR],
-      maxSpendWei: MAX_SPEND_WEI,
-      stuckMs: STUCK_MS,
-      maxEvidenceAgeBlocks: 64
-    },
-    base,
-    ACCOUNT,
-    executorLiquidationValidator({
-      executor: EXECUTOR,
-      protocol: { kind: 'midnight', midnight: MIDNIGHT }
-    })
-  )
-  return { ...config, caps: { native: BigInt(reservations) * MAX_SPEND_WEI } }
-}
+/** A Base liquidator's settings, as a live run would record them, for the fake chain's accounts. */
+export const testSettings = (): LiquidatorSettings => ({
+  runId: 'run',
+  chainId: base.id,
+  account: ACCOUNT,
+  executor: EXECUTOR,
+  midnight: MIDNIGHT,
+  nativeToken: NATIVE,
+  kernel: {
+    maxFeePerGasWei: 10n ** 9n,
+    maxSpendWei: 10n ** 16n,
+    maxGasLimit: 10n ** 7n,
+    finality: 'safe',
+    enrollment: 'enrolling'
+  },
+  worldValidMs: 60_000,
+  sendLifeMs: 40_000,
+  minSurplusBps: 0,
+  sizing: { seizeCapMarginBps: 0, headroomFloorBps: 0 },
+  markets: { refreshMs: MARKETS_REFRESH_MS, maxAgeMs: 60_000 },
+  prices: { refreshMs: 60_000, validForMs: 300_000 },
+  venues: [],
+  venue: { concurrency: 4 },
+  maxReservations: 4,
+  backoff: { baseBlocks: 1, maxBlocks: 4 }
+})
 
 export const until = async (done: () => boolean, what: string, ms = 20_000) => {
   const deadline = Date.now() + ms
@@ -243,16 +259,78 @@ export const until = async (done: () => boolean, what: string, ms = 20_000) => {
   }
 }
 
-const discardingJournal = {
-  sink: { append: async () => {}, finalize: async () => {} },
-  capacityBytes: 1_000_000
+const replayed = (header: Parameters<typeof replayGraph>[0], entries: readonly JournalEntry[]) => {
+  const report = replay(replayGraph(header), entries)
+  if (!report.ok) throw new Error(`the journal diverged at step ${report.step}: ${report.reason}`)
+  return report.steps
+}
+
+/** Rebuilds the graph from the file's header alone, and fails unless the file ended clean and every step replays exactly. */
+export const replayFile = async (path: string) => {
+  let replayer: ReturnType<typeof createReplayer> | undefined
+  let steps = 0
+  for await (const read of readJournalFile(path)) {
+    if (read.kind === 'header') replayer = createReplayer(replayGraph(read.header))
+    else if (read.kind === 'entry') {
+      const replayed = replayer!.apply(read.entry)
+      if (replayed.kind === 'diverged')
+        throw new Error(`the journal diverged at line ${read.line}: ${replayed.reason}`)
+      if (replayed.kind === 'step') steps += 1
+    } else if (read.status !== 'clean' || !replayer)
+      throw new Error(`the journal file is unreadable: ${read.status}`)
+  }
+  return steps
+}
+
+/** Journals through the real file sink, under the run id and settings a live run would record. */
+const fileJournal = async (settings: LiquidatorSettings) => {
+  const directory = await mkdtemp(join(tmpdir(), 'midnight-journal-'))
+  const created = await createJournalFileSink({
+    directory,
+    graph: LIQUIDATOR_GRAPH,
+    build: { revision: '0d58dd8e5', imageTag: 'test' },
+    capacityBytes: JOURNAL_CAPACITY_BYTES,
+    runCapBytes: JOURNAL_RUN_CAP_BYTES,
+    runId: settings.runId,
+    settings
+  })
+  return {
+    journal: created.journal,
+    path: created.path,
+    replay: async () => {
+      try {
+        return await replayFile(created.path)
+      } finally {
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  }
+}
+
+/**
+ * Journals in memory, for a suite on fake timers, whose clock real file I/O does not follow, and
+ * replays its entries and settings as the codec returns them, as a file would.
+ */
+const memoryJournal = (settings: LiquidatorSettings) => {
+  const entries: JournalEntry[] = []
+  const decoded = <T>(value: T) => decode(encode(value)) as T
+  const journal = {
+    sink: {
+      append: async (entry: JournalEntry) => void entries.push(decoded(entry)),
+      finalize: async () => {}
+    },
+    capacityBytes: JOURNAL_CAPACITY_BYTES
+  }
+  const header = { graph: LIQUIDATOR_GRAPH, run: settings.runId, settings }
+  return { journal, path: undefined, replay: async () => replayed(decoded(header), entries) }
 }
 
 /**
  * The liquidator against a fake chain. `alive` holds the positions discovery returns; one is
  * liquidatable once unhealthy, or once a block's timestamp passes `world.maturity`. A mined
  * liquidation seizes its slot whole and retires the position with its last slot, unless `squeeze`
- * says the shared route is spent.
+ * says the shared route is spent. It journals to a file unless given a `journal`, and its
+ * `shutdown` replays what it journaled.
  */
 // oxlint-disable-next-line complexity
 export const startBot = async (
@@ -260,6 +338,8 @@ export const startBot = async (
     chain?: FakeChain
     store?: MemoryStore
     alive?: Map<string, Position>
+    /** Replaces {@link testSettings}, before the overrides below. */
+    settings?: LiquidatorSettings
     enrollment?: 'enrolling' | 'enrolled'
     reservations?: number
     concurrency?: number
@@ -291,13 +371,42 @@ export const startBot = async (
     /** How long a prepared liquidation's quote authorizes its send; Base's by default. */
     sendLifeMs?: number
     journal?: NonNullable<RunnerOptions['journal']>
+    /** Journals in memory rather than to a file, for a suite on fake timers. */
+    inMemory?: boolean
   } = {}
 ) => {
   const now = parameters.now ?? Date.now
   const chain = parameters.chain ?? new FakeChain()
   const store = parameters.store ?? new MemoryStore()
   const alive = parameters.alive ?? new Map<string, Position>()
-  const reservations = parameters.reservations ?? 4
+  const defaults = parameters.settings ?? testSettings()
+  const budget = parameters.venueBudget ?? defaults.venue.budget
+  const settings: LiquidatorSettings = {
+    ...defaults,
+    ...(parameters.runId !== undefined && { runId: parameters.runId }),
+    ...(parameters.worldValidMs !== undefined && { worldValidMs: parameters.worldValidMs }),
+    ...(parameters.sendLifeMs !== undefined && { sendLifeMs: parameters.sendLifeMs }),
+    ...(parameters.reservations !== undefined && { maxReservations: parameters.reservations }),
+    ...(parameters.routeCostBps && { venues: ['0x'] }),
+    ...(parameters.backoffBlocks !== undefined && {
+      backoff: { baseBlocks: parameters.backoffBlocks, maxBlocks: parameters.backoffBlocks }
+    }),
+    kernel: { ...defaults.kernel, enrollment: parameters.enrollment ?? defaults.kernel.enrollment },
+    markets: { ...defaults.markets, maxAgeMs: parameters.maxAgeMs ?? defaults.markets.maxAgeMs },
+    prices: {
+      refreshMs: parameters.pricesRefreshMs ?? defaults.prices.refreshMs,
+      validForMs: parameters.pricesValidMs ?? defaults.prices.validForMs
+    },
+    venue: {
+      concurrency: parameters.concurrency ?? defaults.venue.concurrency,
+      ...(budget && { budget })
+    }
+  }
+  const recorded = parameters.journal
+    ? undefined
+    : parameters.inMemory
+      ? memoryJournal(parseLiquidatorSettings(settings))
+      : await fileJournal(parseLiquidatorSettings(settings))
   const lines: Line[] = []
   const world: {
     maturity: bigint
@@ -341,7 +450,7 @@ export const startBot = async (
   }
   const minedInBlock = new Map<number, number>()
   chain.onMined = (payload, block) => {
-    const target = liquidated(payload)
+    const target = liquidated(payload, settings.executor)
     if (!target) return 'success'
     const index = minedInBlock.get(block) ?? 0
     minedInBlock.set(block, index + 1)
@@ -360,13 +469,11 @@ export const startBot = async (
       ]
     return lastGood
   }
-  const options = {
+  const bot = await startLiquidator(settings, {
     kernel: {
-      config: kernelConfig(reservations),
       store,
       chain,
       effects: chain.effects,
-      enrollment: parameters.enrollment ?? 'enrolling',
       pollMs: 5,
       effectTimeoutMs: 1_000,
       reorgDepth: 16,
@@ -395,64 +502,16 @@ export const startBot = async (
               : []
           })
         )
-      },
-      caller: EXECUTOR
-    },
-    worldValidMs: parameters.worldValidMs ?? 60_000,
-    prepare: {
-      executor: EXECUTOR,
-      minSurplusBps: 0,
-      quoteFor: async (plan, _out, key) => {
-        world.quotes += 1
-        world.quotedBy.push(key)
-        if (parameters.quote) return parameters.quote(plan, key)
-        if (parameters.quoteMs) await sleep(parameters.quoteMs)
-        if (world.quoteFails) throw new Error('the venue is down')
-        if (world.quotesShort) return { kind: 'failed', reason: 'floor_unmet', firmCalls: 1 }
-        return { kind: 'swap', plan: swap, firmCalls: 1 }
-      },
-      encode: (market, borrower, plan, swapPlan) =>
-        encodeLiquidationExec({
-          executor: EXECUTOR,
-          midnight: MIDNIGHT,
-          market,
-          collateralIndex: plan.collateralIndex,
-          seizedAssets: plan.seizedAssets,
-          repaidUnits: plan.repaidUnits,
-          borrower,
-          postMaturityMode: plan.postMaturityMode,
-          plan: swapPlan,
-          recipient: ACCOUNT
-        }),
-      simulate: async () => ({ status: 'ok' }),
-      feesFor: async () => ({
-        l1Data: 0n,
-        baseFee: 0n,
-        gasLimit: 0n,
-        firstBid: () => ({ maxFeePerGas: 0n, gas: 0n })
-      }),
-      nativeToken: NATIVE,
-      validForMs: parameters.sendLifeMs ?? 40_000,
-      now
-    },
-    sizing: { seizeCapMarginBps: 0, headroomFloorBps: 0 },
-    markets: {
-      initial: sources(),
-      maxAgeMs: parameters.maxAgeMs ?? 60_000,
-      refreshMs: MARKETS_REFRESH_MS,
-      refresh: async () => {
-        if (world.marketsThrow) throw new Error('the markets API is down')
-        return sources()
       }
     },
-    prices: {
-      refreshMs: parameters.pricesRefreshMs ?? 60_000,
-      validForMs: parameters.pricesValidMs ?? 300_000,
-      refresh: async () => {
-        if (!world.pricesDown)
-          lastPrices = { table: world.unpriced ? {} : PRICES, updatedAt: now() }
-        return lastPrices
-      }
+    markets: { initial: sources() },
+    refreshMarkets: async () => {
+      if (world.marketsThrow) throw new Error('the markets API is down')
+      return sources()
+    },
+    refreshPrices: async () => {
+      if (!world.pricesDown) lastPrices = { table: world.unpriced ? {} : PRICES, updatedAt: now() }
+      return lastPrices
     },
     routes: parameters.routeCostBps
       ? {
@@ -468,33 +527,29 @@ export const startBot = async (
             curveCosting(
               parameters.routeCostBps!(marketOfCollateral(pair.collateral)),
               world.curvesAt ?? now()
-            ),
-          venues: ['0x']
+            )
         }
       : {
           resolvePair: async () => null,
           sweep: async () => {},
-          curveOf: () => undefined,
-          venues: []
+          curveOf: () => undefined
         },
-    venue: {
-      concurrency: parameters.concurrency ?? 4,
-      ...(parameters.venueBudget && { budget: parameters.venueBudget })
+    quoteFor: async (plan, _out, key) => {
+      world.quotes += 1
+      world.quotedBy.push(key)
+      if (parameters.quote) return parameters.quote(plan, key)
+      if (parameters.quoteMs) await sleep(parameters.quoteMs)
+      if (world.quoteFails) throw new Error('the venue is down')
+      if (world.quotesShort) return { kind: 'failed', reason: 'floor_unmet', firmCalls: 1 }
+      return { kind: 'swap', plan: swap, firmCalls: 1 }
     },
-    backoff: {
-      baseBlocks: parameters.backoffBlocks ?? 1,
-      maxBlocks: parameters.backoffBlocks ?? 4
-    },
-    runId: parameters.runId ?? 'run',
-    maxReservations: reservations,
+    simulate: async () => ({ status: 'ok' }),
+    readFees: async () => ({ estimatedGas: 100_000n, baseFeePerGas: 1n, l1Data: 0n }),
     stats: createTickStats(),
     planSkipLog: createPlanSkipLog(),
-    logger: recordingLogger(lines, () => world.logFailsOn)
-  } satisfies Omit<Parameters<typeof startLiquidator>[0], 'journal'>
-  const bot = await startLiquidator({
-    ...options,
+    logger: recordingLogger(lines, () => world.logFailsOn),
     now,
-    journal: parameters.journal ?? discardingJournal
+    journal: parameters.journal ?? recorded!.journal
   })
   const state = () => bot.runner.read(bot.nodes.kernel.nodes.state)!
   let miner: ReturnType<typeof setInterval> | undefined
@@ -504,7 +559,8 @@ export const startBot = async (
   }
   return {
     ...bot,
-    options,
+    settings,
+    journalPath: recorded?.path,
     chain,
     store,
     alive,
@@ -516,6 +572,7 @@ export const startBot = async (
     shutdown: async () => {
       mining(false)
       await bot.runner.abandon()
+      return recorded?.replay()
     }
   }
 }

@@ -6,12 +6,15 @@ import type { JournalEntry, Keyed, KeyedWrite, KeyRecord, Latest, Node } from '.
 import {
   createGraph,
   createRunner,
+  emitTo,
   every,
   GraphDefinitionError,
+  isKeyed,
   keyedLevel,
   keyedMap,
   keyRecord,
   latest,
+  NotDataError,
   sample,
   UNREAD,
   watch,
@@ -85,6 +88,129 @@ describe('a keyed level', () => {
     await runner.abandon()
   })
 
+  it('refuses a write naming a key with no value, so a complete write never reads it as absent', async () => {
+    const { runner, writes, level } = positions()
+    runner.push(writes, { coverage: 'complete', entries: { a: { debt: 1 } }, basis: 1 })
+    const unread = { coverage: 'complete', entries: { a: undefined, b: { debt: 2 } }, basis: 2 }
+    expect(() => runner.push(writes, unread as never)).toThrow(WriteRefusedError)
+    expect(keyRecord(runner.read(level)!, 'a')).toMatchObject({ status: 'present', basis: 1 })
+    expect(keyRecord(runner.read(level)!, 'b')).toStrictEqual({ status: 'absent', basis: 1 })
+    await runner.abandon()
+  })
+
+  it.each([
+    [
+      'a keys list with a hole',
+      { coverage: 'failed', keys: Object.assign(Array(3), { 0: 'a', 2: 'b' }) }
+    ],
+    [
+      'an absent list with a hole',
+      { coverage: 'carried', entries: {}, absent: Object.assign(Array(2), { 1: 'a' }), basis: 2 }
+    ],
+    [
+      'an expiry that is no integer',
+      { coverage: 'complete', entries: { a: { debt: 2 } }, basis: 2, expiry: 1.5 }
+    ],
+    ['a reason that is not text', { coverage: 'unknown', reason: 7 }],
+    ['an unknown coverage', { coverage: 'partial', entries: {}, basis: 2 }],
+    ['no basis', { coverage: 'carried', entries: { a: { debt: 2 } } }],
+    [
+      'an expiry the journal drops',
+      Object.defineProperty(
+        { coverage: 'complete', entries: { a: { debt: 2 } }, basis: 2 },
+        'expiry',
+        {
+          value: 5
+        }
+      )
+    ],
+    [
+      'keys the journal drops',
+      Object.defineProperty({ coverage: 'failed' }, 'keys', { value: ['a'] })
+    ]
+  ])(
+    'refuses a keyed write the level would misread or the journal would not carry: %s',
+    async (_, write) => {
+      const { runner, writes, level } = positions()
+      runner.push(writes, { coverage: 'complete', entries: { a: { debt: 1 } }, basis: 1 })
+      const before = runner.record(level)
+      expect(() => runner.push(writes, write as never)).toThrow(WriteRefusedError)
+      expect(runner.record(level)).toBe(before)
+      await runner.abandon()
+    }
+  )
+
+  it('refuses a keys list whose iterator disagrees with its indices as not data', async () => {
+    const { runner, writes, level } = positions()
+    runner.push(writes, { coverage: 'complete', entries: { a: { debt: 1 } }, basis: 1 })
+    const before = runner.record(level)
+    const keys = Object.assign(['a'], {
+      *[Symbol.iterator]() {
+        yield 'b'
+      }
+    })
+    expect(() => runner.push(writes, { coverage: 'failed', keys } as never)).toThrow(NotDataError)
+    expect(runner.record(level)).toBe(before)
+    await runner.abandon()
+  })
+
+  it('fails the step when a fold emits a keyed write the level would misread', async () => {
+    const g = createGraph('keyed-emits')
+    const ticks = g.occurrences<number>('ticks')
+    const writes = g.node<KeyedWrite<number>>('writes')
+    const level = keyedLevel(g, 'level', writes)
+    g.fold('source', {
+      reads: { tick: every(ticks) },
+      initial: 0,
+      emits: [writes],
+      applyInput: (state, { value }) => ({
+        state,
+        emit: [emitTo(writes, { coverage: 'complete', entries: { a: value } } as never)]
+      })
+    })
+    const runner = createRunner(g.build())
+    runner.push(ticks, 1)
+    await expect(runner.stopped).rejects.toBeInstanceOf(WriteRefusedError)
+    expect(runner.record(level).status).not.toBe('present')
+  })
+
+  it("refuses a second reader that judges the level's writes another way", () => {
+    const g = createGraph('two-judges')
+    const writes = g.occurrences<KeyedWrite<number>>('writes')
+    keyedLevel(g, 'level', writes)
+    expect(() =>
+      g.fold('other', {
+        reads: { write: every(writes, () => null) },
+        initial: 0,
+        applyInput: state => ({ state })
+      })
+    ).toThrow(GraphDefinitionError)
+  })
+
+  it('refuses an effect result the level would misread, into the handler that wrote it', async () => {
+    const g = createGraph('keyed-results')
+    const reads = g.occurrences<number>('reads')
+    const results = g.node<KeyedWrite<number>>('results')
+    keyedLevel(g, 'level', results)
+    const refused: unknown[] = []
+    g.effect('read', {
+      requests: { at: every(reads) },
+      results,
+      handle: (_, { write }) => {
+        try {
+          write({ coverage: 'complete', entries: { a: undefined }, basis: 1 } as never)
+        } catch (error) {
+          refused.push(error)
+        }
+      }
+    })
+    const runner = createRunner(g.build())
+    runner.push(reads, 1)
+    await sleep(0)
+    expect(refused).toMatchObject([expect.any(WriteRefusedError)])
+    await runner.abandon()
+  })
+
   it('stops rather than read an empty complete level nobody asserted', async () => {
     const { runner, writes, level } = positions()
     runner.push(writes, { coverage: 'complete', entries: {}, basis: 1 })
@@ -114,6 +240,29 @@ describe('a keyed level', () => {
       status: 'absent',
       basis: 3
     })
+    await runner.abandon()
+  })
+})
+
+describe('the outline of a keyed value', () => {
+  it('tells a keyed value by its coverage status and record of keys', async () => {
+    const { runner, writes, level, liquidatable } = positions()
+    runner.push(writes, { coverage: 'complete', entries: { a: { debt: 1 } }, basis: 1 })
+    expect([UNREAD, runner.read(level), runner.read(liquidatable)].map(isKeyed)).toStrictEqual([
+      true,
+      true,
+      true
+    ])
+    const outlines = [
+      undefined,
+      null,
+      [],
+      { keys: {} },
+      { coverage: { status: 'complete' } },
+      { coverage: 'complete', keys: {} },
+      { coverage: { status: 'complete' }, keys: [] }
+    ]
+    expect(outlines.map(isKeyed)).toStrictEqual(outlines.map(() => false))
     await runner.abandon()
   })
 })
@@ -201,9 +350,10 @@ const expiring = () => {
   const unrelated = g.occurrences<number>('unrelated')
   const level = keyedLevel(g, 'positions', writes)
   const facts = keyedMap(g, 'facts', level, ({ debt }) => ({ debt }))
+  const unreadFacts: Keyed<{ debt: number }> = UNREAD
   const seen = g.fold('seen', {
     reads: { facts: watch(facts) },
-    initial: { facts: UNREAD as Keyed<{ debt: number }>, log: [] as string[] },
+    initial: { facts: unreadFacts, log: [] as string[] },
     applyInput: (state, { value }) => ({ state: { ...state, facts: value.value! } }),
     afterInputs: (state, { at }) => {
       const fact = keyRecord(state.facts, 'a')
@@ -540,6 +690,37 @@ describe('a keyed map that reads whole nodes', () => {
     })
     expect(entries.filter(entry => entry.kind === 'step')).toHaveLength(7)
     expect(replay(valued(sample).g.build(), entries)).toStrictEqual({ ok: true, steps: 7 })
+  })
+
+  it('replays a keyed delta whose new key sorts before the old ones to a map over key order', async () => {
+    const entries: JournalEntry[] = []
+    const keyOrder = () => {
+      const g = createGraph('key-order')
+      const writes = g.occurrences<KeyedWrite<number>>('writes')
+      const level = keyedLevel(g, 'positions', writes)
+      const first = g.map('first', {
+        reads: { level: latest(level) },
+        compute: ({ level }) => Object.keys(level.keys)[0] ?? null
+      })
+      return { graph: g.build(), writes, first }
+    }
+    const live = keyOrder()
+    const runner = createRunner(live.graph, {
+      journal: {
+        sink: { append: async entry => void entries.push(entry), finalize: async () => undefined },
+        capacityBytes: 16_000
+      }
+    })
+    runner.push(live.writes, { coverage: 'complete', entries: { b: 1 }, basis: 1 })
+    runner.push(live.writes, { coverage: 'complete', entries: { a: 2, b: 1 }, basis: 2 })
+    await sleep(0)
+    expect(runner.read(live.first)).toBe('a')
+    await runner.abandon()
+
+    expect(entries.flatMap(entry => (entry.kind === 'step' ? entry.writes : []))[1]).toMatchObject({
+      delta: { entries: { a: 2 }, removed: [] }
+    })
+    expect(replay(keyOrder().graph, entries)).toStrictEqual({ ok: true, steps: 2 })
   })
 
   it.each([

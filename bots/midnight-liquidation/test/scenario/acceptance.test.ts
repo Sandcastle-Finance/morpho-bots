@@ -1,26 +1,49 @@
-import type { JournalEntry } from '@repo/engine'
 import type { KernelState } from '@repo/kernel'
 
 import { parseIntentId } from '@repo/controller'
-import { GraphDefinitionError } from '@repo/engine'
 import { replay } from '@repo/engine/replay'
 import { factId } from '@repo/kernel'
+import { createJournalFileSink, readJournalFile } from '@repo/kit'
 import { MAX_COST_LEVEL_AGE_MS, venuePairKey } from '@repo/swaps'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Position } from './bot'
 
-import { declareLiquidator } from '../../src/graph'
+import { loadConfig } from '../../src/config'
+import { InvalidSettingsError } from '../../src/errors'
+import { LIQUIDATOR_GRAPH } from '../../src/graph'
+import { liquidatorAccount } from '../../src/kernel'
+import { replayGraph } from '../../src/replay'
 import { classifyWorld } from '../../src/report'
-import { collateralAt, LOAN, positionKey, startBot, STUCK_BLOCKS, unhealthy, until } from './bot'
+import { liquidatorSettings } from '../../src/settings'
+import {
+  collateralAt,
+  LOAN,
+  positionKey,
+  startBot,
+  STUCK_BLOCKS,
+  testSettings,
+  unhealthy,
+  until
+} from './bot'
 
 type Bot = Awaited<ReturnType<typeof startBot>>
 
+/** Each shutdown replays its bot's whole journal. */
+const SHUTDOWN_TIMEOUT_MS = 60_000
+
 const bots: Bot[] = []
+const temporary: string[] = []
 afterEach(async () => {
-  for (const bot of bots.splice(0)) await bot.shutdown()
-})
+  const shutdowns = await Promise.allSettled(bots.splice(0).map(bot => bot.shutdown()))
+  for (const path of temporary.splice(0)) await rm(path, { recursive: true, force: true })
+  const failed = shutdowns.find(shutdown => shutdown.status === 'rejected')
+  if (failed) throw failed.reason
+}, SHUTDOWN_TIMEOUT_MS)
 
 const started = async (parameters: Parameters<typeof startBot>[0] = {}) => {
   const bot = await startBot(parameters)
@@ -57,7 +80,50 @@ const candidatesOf = (state: KernelState, position: Position) =>
       .map(candidate => ({ ...candidate, nonce: record.nonce }))
   )
 
+const PRIVATE_KEY = `0x${'3a'.repeat(32)}` as const
+const MORPHO_API_KEY = 'morpho-canary-key'
+const RPC_URL = 'https://rpc.example/v2/rpc-canary-credential'
+
 describe('the Midnight liquidator on the engine', () => {
+  it('never writes its configured private key, API key or RPC URL to its journal', async () => {
+    const config = loadConfig({
+      CHAIN_ID: '8453',
+      FINALITY_8453: 'safe',
+      RPC_URL,
+      LIQUIDATOR_PRIVATE_KEY: PRIVATE_KEY,
+      MORPHO_API_KEY,
+      KERNEL_STATE_DIR: '/nonexistent',
+      KERNEL_ENROLLMENT: 'enrolling',
+      JOURNAL_RUN_CAP_BYTES: '1073741824',
+      BUILD_REVISION: '0d58dd8e5',
+      BUILD_IMAGE_TAG: 'test',
+      MAX_FEE_GWEI: '250',
+      MAX_SPEND_ETH: '0.4',
+      MAX_GAS_LIMIT: '12000000',
+      ZEROX_API_KEY: 'zx-key'
+    })
+    const settings = {
+      ...liquidatorSettings(config, {
+        account: liquidatorAccount(config).address,
+        runId: 'canary'
+      }),
+      // The fake chain's markets are on the harness's Midnight, which its validator checks.
+      midnight: testSettings().midnight
+    }
+    const bot = await started({ settings })
+    const position = unhealthy(0, 1)
+    add(bot, position)
+    bot.chain.mine(false)
+    await until(() => candidatesOf(bot.state(), position)[0]?.sent === 'accepted', 'the send')
+    await bot.runner.abandon()
+
+    const journal = (await readFile(bot.journalPath!, 'utf8')).toLowerCase()
+    expect(journal).toContain(settings.account.toLowerCase())
+    expect(journal).not.toContain(PRIVATE_KEY.slice(2))
+    expect(journal).not.toContain(MORPHO_API_KEY)
+    expect(journal).not.toContain('rpc-canary-credential')
+  })
+
   it('liquidates independent positions at once, and a two-slot position once per slot', async () => {
     const bot = await started()
     const [a, b] = [unhealthy(0, 1), unhealthy(0, 2, [0, 1])]
@@ -85,7 +151,7 @@ describe('the Midnight liquidator on the engine', () => {
   it('refuses to boot with a world budget that is not a positive safe integer', async () => {
     for (const worldValidMs of [0, -1, 1.5, Number.NaN])
       await expect(startBot({ worldValidMs })).rejects.toThrow(
-        new GraphDefinitionError('world needs a positive safe integer validForMs')
+        new InvalidSettingsError(['worldValidMs'])
       )
   })
 
@@ -488,29 +554,32 @@ describe('the Midnight liquidator on the engine', () => {
     expect(kindsAt(bot.state(), 0).filter(kind => kind === 'step')).toHaveLength(1)
   })
 
-  it('replays its journal on a graph rebuilt later with an empty whitelist cache', async () => {
-    const entries: JournalEntry[] = []
-    const journal = {
-      sink: {
-        append: async (entry: JournalEntry) => void entries.push(entry),
-        finalize: async () => {}
-      },
-      capacityBytes: 10_000_000
-    }
-    const bot = await started({ journal })
+  it('replays the journal file it wrote on a graph rebuilt from its settings a day later', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'midnight-replay-'))
+    temporary.push(directory)
+    const settings = testSettings()
+    const file = await createJournalFileSink({
+      directory,
+      graph: LIQUIDATOR_GRAPH,
+      build: { revision: 'f0f0f0', imageTag: 'replay-test' },
+      capacityBytes: 10_000_000,
+      runCapBytes: 1_000_000_000,
+      runId: settings.runId,
+      settings
+    })
+    const bot = await started({ settings, journal: file.journal })
     const position = unhealthy(0, 7)
     add(bot, position)
     bot.mining(true)
     await until(() => bot.events('tx.included').length === 1, 'the settlement')
     await bot.shutdown()
+    const reads = await Array.fromAsync(readJournalFile(file.path))
+    expect(reads.at(-1)).toMatchObject({ status: 'clean' })
+    const entries = reads.flatMap(read => (read.kind === 'entry' ? [read.entry] : []))
+    const header = reads.find(read => read.kind === 'header')!.header
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 86_400_000)
-    const refresh = vi.fn(async () => [])
-    const { graph } = declareLiquidator({
-      ...bot.options,
-      markets: { ...bot.options.markets, refresh }
-    })
+    const graph = replayGraph(header)
     vi.restoreAllMocks()
-    expect(refresh).not.toHaveBeenCalled()
     expect(replay(graph, entries)).toStrictEqual({ ok: true, steps: expect.any(Number) })
-  })
+  }, 30_000)
 })

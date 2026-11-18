@@ -41,7 +41,7 @@ describe('countTick', () => {
   })
 
   it('reports a failed read at the newest head, since its write names no block', () => {
-    const atHead = fold([{ from: 'head', value: { number: 40, hash: '0x' } as never }])
+    const atHead = fold([{ from: 'head', value: { number: 40, hash: '0x' } }])
     expect(countTick(atHead, read({ coverage: 'failed', reason: 'lens' })).tick?.block).toBe(40)
   })
 })

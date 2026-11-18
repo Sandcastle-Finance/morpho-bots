@@ -16,7 +16,7 @@
  *
  * Usage (needs an RPC for CHAIN_ID; no anvil required):
  *   RPC_URL=https://base-rpc.publicnode.com CHAIN_ID=8453 VAULT=0x… \
- *     pnpm --filter @morpho-org/vault-v2-reallocation run probe:lens
+ *     bun run --filter @morpho-org/vault-v2-reallocation probe:lens
  */
 import type { MarketParams } from '@morpho-org/blue-sdk'
 import type { Hex } from 'viem'
@@ -191,14 +191,11 @@ async function main() {
     blockNumber
   })
 
+  const { _totalAssets: accruedTotalAssets } = vaultV2.accrueInterest(block.timestamp).vault
   const rows: Row[] = [
     compare('adapterAddress', lensData.adapterAddress, adapterAddress),
     compare('isAllocator', lensData.isAllocator, directIsAllocator),
-    compare(
-      'totalAssets',
-      lensData.totalAssets,
-      vaultV2.accrueInterest(block.timestamp).vault._totalAssets
-    ),
+    compare('totalAssets', lensData.totalAssets, accruedTotalAssets),
     compare('idleAssets', lensData.idleAssets, vaultV2.assetBalance),
     compare('marketCount', BigInt(lensData.marketsData.length), BigInt(markets.length))
   ]

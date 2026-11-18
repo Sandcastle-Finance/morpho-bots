@@ -7,7 +7,8 @@ const REPLAY_MODULE = '@repo/engine/replay'
 /** `replay` re-runs a journal for tests and tools; a running bot or package never needs it. */
 export const noReplayInSrc: Rule = {
   create: context => {
-    if (!pathSegments(context.filename, context.cwd).includes('src')) return {}
+    const segments = pathSegments(context.filename, context.cwd)
+    if (segments[0] === 'tools' || !segments.includes('src')) return {}
     return {
       ImportDeclaration(node) {
         if (node.source.value !== REPLAY_MODULE) return

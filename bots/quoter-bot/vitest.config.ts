@@ -1,10 +1,12 @@
 import { fileURLToPath } from 'node:url'
+import soltag from 'soltag/vite'
 import { loadEnv } from 'vite'
 import { defineConfig } from 'vitest/config'
 
 const BOT_DIR = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
+  plugins: [soltag({ solc: { optimizer: { enabled: true, runs: 200 } } })],
   test: {
     name: 'quoter-bot',
     include: ['test/**/*.test.ts'],

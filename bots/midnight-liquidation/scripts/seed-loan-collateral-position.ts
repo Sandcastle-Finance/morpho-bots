@@ -19,7 +19,7 @@
  * revert. `--dry-run` performs the full read path and every fail-closed assertion, and sends nothing.
  *
  *   RPC_URL=... PRIVATE_KEY_LENDER=0x... PRIVATE_KEY_BORROWER=0x... \
- *     pnpm --filter @morpho-org/midnight-liquidation run seed:loan-collateral -- \
+ *     bun run --filter @morpho-org/midnight-liquidation seed:loan-collateral -- \
  *       --markets-api https://…/v0/midnight/markets --market 0x… --face-usdc 0.7 --dry-run
  *
  * Never prints secrets (keys, full RPC URL).
@@ -261,12 +261,12 @@ async function main() {
   // The id is a cryptographic commitment to the Market struct, so reading the struct back and
   // re-deriving the id proves the local `toId` port still matches this deployment before anything
   // is signed against that struct.
-  const market = (await publicClient.readContract({
+  const market = await publicClient.readContract({
     address: MIDNIGHT,
     abi: MidnightAbi,
     functionName: 'toMarket',
     args: [args.market]
-  })) as Market
+  })
   const derivedId = toId(market)
   if (derivedId.toLowerCase() !== args.market.toLowerCase()) {
     throw new Error(`toId(toMarket(${args.market})) = ${derivedId} — market id self-check FAILED`)

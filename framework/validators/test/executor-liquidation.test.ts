@@ -423,7 +423,7 @@ describe.each<LiquidationProtocol>([
       'calldata does not decode'
     ],
     ['an exec that carries no call', tx(emptyExec), ACCOUNT, 'exec carries no call'],
-    ['calldata that is not hex', tx('0xzz' as Hex), ACCOUNT, 'calldata does not decode'],
+    ['calldata that is not hex', tx('0xzz'), ACCOUNT, 'calldata does not decode'],
     ['an exec with trailing bytes', tx(`${emptyExec}00`), ACCOUNT, 'calldata is not canonical']
   ])('refuses %s', (_, payload, account, reason) => {
     expect(read(payload as Payload, account)).toStrictEqual({ ok: false, reason })

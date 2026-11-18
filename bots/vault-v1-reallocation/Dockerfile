@@ -1,35 +1,40 @@
 # syntax=docker/dockerfile:1
 # Image for the vault-v1-reallocation bot. The build context MUST be the repo root so the workspace
 # packages (packages/*, framework/*) resolve; docker-compose.yml sets `context: ../..`. All data
-# comes over RPC, so there is no indexer or database sidecar to build. Node only: pnpm installs,
-# esbuild bundles, node runs.
-FROM node:24.22.1-slim
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# comes over RPC, so there is no indexer or database sidecar to build. Bun installs and builds,
+# esbuild bundles, node runs; the final stage has no Bun.
+FROM node:24.22.3-slim AS build
 
-# The container's environment holds a funded allocator EOA key, so nothing here may run as root.
-# Corepack's pnpm shim lands in /usr/local/bin, which only root may write, so enable it before
-# dropping privileges; every layer after `USER node` is unprivileged.
-RUN corepack enable pnpm
+# Bun is the package manager of the build stage only, copied from its pinned official image.
+COPY --from=oven/bun:1.4.4-slim@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 /usr/local/bin/bun /usr/local/bin/bun
 RUN mkdir -p /repo && chown node:node /repo
 WORKDIR /repo
 USER node
 
-# Manifests first, so the install layer is cached. `corepack install` pre-fetches the pnpm version
-# pinned in package.json#packageManager.
-COPY --chown=node:node package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-# `pnpm-workspace.yaml` declares patchedDependencies, so the install fails without these.
+# Manifests first, so the install layer is cached. package.json holds the workspaces, catalog,
+# overrides, patchedDependencies and trustedDependencies; bunfig.toml the install settings.
+COPY --chown=node:node package.json bunfig.toml bun.lock ./
+# `package.json` declares patchedDependencies, so the install fails without these.
 COPY --chown=node:node patches ./patches
-RUN corepack install
 
-# All members' package.json are needed for pnpm to resolve the `workspace:*` links.
+# All members' package.json are needed for Bun to resolve the `workspace:*` links.
 COPY --chown=node:node packages ./packages
 COPY --chown=node:node framework ./framework
 COPY --chown=node:node bots ./bots
-RUN pnpm install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # Bundle at image-build time: workspace dists plus this bot's esbuild bundle, so the container
 # starts a plain `node` with no runtime transform.
-RUN pnpm -r --if-present run build
+# Bun orders a filtered run by direct dependencies only, so @repo/contracts, which several bots
+# reach only transitively, builds first.
+RUN bun run --filter @repo/contracts build && bun run --filter './bots/*' --if-present build
+
+# Only the built workspace crosses over, so the image runs Node with no package manager in it.
+FROM node:24.22.3-slim
+RUN mkdir -p /repo && chown node:node /repo
+WORKDIR /repo
+USER node
+COPY --from=build --chown=node:node /repo /repo
 
 # The kernel's ledger and the journal live here. Created as `node` so a fresh Docker volume mounted
 # over it is writable without root.

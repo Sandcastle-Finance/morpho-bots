@@ -30,10 +30,10 @@ import { declareKernelHost } from '@repo/kernel'
 
 import type { FactNode, KernelDomain } from './act'
 import type { LogSink } from './log'
-import type { KernelView } from './view'
+import type { KernelHealth, KernelView } from './view'
 
 import { kernelDomain } from './act'
-import { declareView } from './view'
+import { declareHealth, declareView } from './view'
 
 /** Why one kernel takes one task family, which its refusal names. */
 const ONE_FAMILY =
@@ -46,7 +46,8 @@ export const secondFamily = (second: Node<unknown>, first: Node<unknown>) =>
   )
 
 /**
- * The bot's one kernel and its view `kernel.view`, whose handles exist at once. Its folds are
+ * The bot's one kernel, its view `kernel.view` and its health `kernel.health`, whose handles exist
+ * at once. Its folds are
  * declared once the bot's declaration returns, over every fact `b.fact` registered, the one node
  * `requestsFrom` named and the `requests` `b.kernel` took, wherever in the declaration they came.
  */
@@ -54,6 +55,7 @@ export type KernelHandle = Readonly<{
   domain: KernelDomain<string>
   nodes: KernelNodes
   view: Node<KernelView>
+  health: Node<KernelHealth>
   start: (runner: Runner) => Promise<void>
   /**
    * Names the node the kernel's one task family writes its acts to.
@@ -108,19 +110,19 @@ export type Bot = Readonly<{
    * to `head`: see `docs/framework/AUTHORING.md` §4.
    * @throws GraphDefinitionError - for an invalid `validForMs` or a sample named `state`.
    */
-  source: <T, S extends Sampled = Record<never, never>>(
+  source: <T, S extends Sampled = {}>(
     id: string,
     spec: SourceSpec<T, S>
   ) => Readonly<{ writes: Stream<KeyedWrite<T>>; level: State<Keyed<T>> }>
   /** `keyedMap(g, id, over, project, options)`, registered with the kernel as a fact. */
-  fact: <I, O, W extends Record<string, Latest<unknown>> = Record<never, never>>(
+  fact: <I, O, W extends Record<string, Latest<unknown>> = {}>(
     id: string,
     over: Node<Keyed<I>>,
     project: Project<I, O, W>,
     options?: KeyedMapOptions<I, W>
   ) => FactNode<string, O>
   /** `keyedMap(g, id, over, project, options)`. */
-  derive: <I, O, W extends Record<string, Latest<unknown>> = Record<never, never>>(
+  derive: <I, O, W extends Record<string, Latest<unknown>> = {}>(
     id: string,
     over: Node<Keyed<I>>,
     project: Project<I, O, W>,
@@ -130,7 +132,7 @@ export type Bot = Readonly<{
    * The effect `id`: every write of each node in `on`, by its name there, read beside `samples`. An
    * async `handle` is awaited, so its rejection fails the graph as a throw does.
    */
-  sink: <R extends Streams, S extends Record<string, Node<unknown>> = Record<never, never>>(
+  sink: <R extends Streams, S extends Record<string, Node<unknown>> = {}>(
     id: string,
     spec: Readonly<{
       on: R
@@ -205,6 +207,9 @@ export const defineBot =
           domain,
           nodes: host.nodes,
           view: declareView(g, 'kernel.view', host.nodes.state),
+          health: declareHealth(g, 'kernel.health', host.nodes.state, {
+            chainId: hosting.config.chainId
+          }),
           start: host.start,
           requestsFrom: node => {
             if (attached)

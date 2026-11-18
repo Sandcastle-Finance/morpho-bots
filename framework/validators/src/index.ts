@@ -7,6 +7,7 @@ export {
   midnightCommitmentGroup,
   midnightCommitmentRead,
   midnightPublicationPlan,
+  midnightRedemption,
   midnightTreeWitness
 } from './midnight-plans'
 export { vaultV1ReallocationValidator } from './vault-v1-reallocation'

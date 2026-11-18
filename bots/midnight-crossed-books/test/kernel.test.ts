@@ -12,7 +12,7 @@ import { crossedBook, marketAt, resolutionOf } from './scenario/bot'
 
 /** A node answering only what signing reads, estimating `gas` for every transaction. */
 const mockRpc = (gas: bigint) =>
-  vi.spyOn(globalThis, 'fetch').mockImplementation((async (_url, init) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
     const body = JSON.parse(init?.body as string) as { id: number; method: string }
     const results: Record<string, unknown> = {
       eth_chainId: '0x2105',
@@ -26,7 +26,7 @@ const mockRpc = (gas: bigint) =>
           id: body.id,
           error: { code: MethodNotFoundRpcError.code, message: `unmocked ${body.method}` }
         })
-  }) as typeof fetch)
+  })
 
 const guard = { signal: new AbortController().signal, mayAct: () => true }
 const logger = createLogger('error', { env: {} })
@@ -39,6 +39,9 @@ const kernel = () => {
     RESOLVER_PRIVATE_KEY: `0x${'1'.repeat(64)}`,
     KERNEL_STATE_DIR: '/nonexistent',
     KERNEL_ENROLLMENT: 'enrolled',
+    JOURNAL_RUN_CAP_BYTES: '1073741824',
+    BUILD_REVISION: '0d58dd8e5',
+    BUILD_IMAGE_TAG: 'test',
     MAX_FEE_GWEI: '0.5',
     MAX_SPEND_ETH: '0.0075',
     MAX_GAS_LIMIT: '15000000'

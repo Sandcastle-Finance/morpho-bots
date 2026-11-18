@@ -3,6 +3,7 @@ import type { SetupReading } from './application/engine/readings'
 import type { MonitoringEvent } from './application/monitoring/monitoring-event'
 import type { QuoterReport } from './infrastructure/engine/quoter-polls'
 
+import { SUPERSEDED } from './application/engine/market-report'
 import { marketKey } from './application/engine/readings'
 import {
   createMarketProjection,
@@ -15,8 +16,8 @@ const failing = (report: MarketReport) => report.status === 'failed' || report.s
 /** What a run's reporter knows once the run ends. */
 export type QuoterReports = Readonly<{
   /**
-   * Each market's final report: its last act's outcome if it acted, unless a failed or halted
-   * decision came after it; otherwise its last decision.
+   * Each market's final report: the outcome of its last act it did not supersede, unless a failed
+   * or halted decision came after it; otherwise its last decision.
    */
   final: () => readonly MarketReport[]
   /** Each counted market's last counted report, while any of them is failed or halted. */
@@ -110,7 +111,7 @@ export const createQuoterReporter = (parameters: {
     /** Records a graph report and writes its monitoring records. */
     onReport: (report: QuoterReport) => {
       if (report.type === 'outcome') {
-        acted.set(report.key, report.report)
+        if (report.report.action !== SUPERSEDED) acted.set(report.key, report.report)
         return emit(eventsOf([report.report]))
       }
       if (report.type === 'decided') {

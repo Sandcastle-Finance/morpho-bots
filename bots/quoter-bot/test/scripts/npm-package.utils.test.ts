@@ -4,10 +4,7 @@ import { NpmPackFailedError } from '../../scripts/errors'
 import {
   assertBinBundle,
   assertPublishableVersion,
-  buildNpmPackageManifest,
-  NPM_BIN_NAME,
-  NPM_BUNDLE_FILENAME,
-  NPM_PACKAGE_NAME
+  buildNpmPackageManifest
 } from '../../scripts/npm-package.utils'
 
 describe('assertPublishableVersion', () => {
@@ -61,10 +58,10 @@ describe('buildNpmPackageManifest', () => {
   const manifest = buildNpmPackageManifest('0.1.0')
 
   test('publishes the CLI package name, version, and bin command', () => {
-    expect(manifest.name).toBe(NPM_PACKAGE_NAME)
+    expect(manifest.name).toBe('@morpho-org/quoter')
     expect(manifest.version).toBe('0.1.0')
-    expect(manifest.bin).toEqual({ [NPM_BIN_NAME]: `./${NPM_BUNDLE_FILENAME}` })
-    expect(manifest.files).toEqual([NPM_BUNDLE_FILENAME])
+    expect(manifest.bin).toEqual({ 'morpho-quoter': './morpho-quoter.js' })
+    expect(manifest.files).toEqual(['morpho-quoter.js'])
     expect(manifest.type).toBe('module')
   })
 

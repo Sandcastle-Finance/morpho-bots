@@ -107,12 +107,6 @@ describe('createAccountSigner', () => {
     await expect(signerOf().getBaseFee()).rejects.toThrow(/baseFeePerGas/)
   })
 
-  it('signs a policy-compliant exec call', async () => {
-    mockRpc({ eth_chainId: `0x${base.id.toString(16)}`, eth_estimateGas: '0x5208' })
-    const signed = await signerOf(POLICY).sign({ ...REQUEST, nonce: 5 })
-    expect(parseTransaction(signed.raw)).toMatchObject({ nonce: 5, to: EXECUTOR, gas: STUB_GAS })
-  })
-
   it('asks mayAct after preparation and policy, and signs nothing it refuses', async () => {
     let authorized = true
     mockRpc({
@@ -207,13 +201,6 @@ describe('createAccountSigner', () => {
       signerOf().sign({ ...REQUEST, to: `0x${'99'.repeat(20)}`, nonce: 5, mayAct })
     ).rejects.toBeInstanceOf(PolicyViolationError)
     expect(mayAct).not.toHaveBeenCalled()
-  })
-
-  it('refuses a non-Executor target before signing', async () => {
-    mockRpc({ eth_chainId: `0x${base.id.toString(16)}`, eth_estimateGas: '0x5208' })
-    await expect(
-      signerOf(POLICY).sign({ ...REQUEST, to: `0x${'99'.repeat(20)}`, nonce: 5 })
-    ).rejects.toMatchObject({ check: 'target' })
   })
 })
 

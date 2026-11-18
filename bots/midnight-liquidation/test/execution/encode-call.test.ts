@@ -115,7 +115,7 @@ function encodeBadDebtRealization() {
 function outerCalls(data: Hex): readonly Hex[] {
   const top = decodeFunctionData({ abi: executorAbi, data })
   if (top.functionName !== 'exec_606BaXt') throw new Error('expected exec_606BaXt')
-  return top.args[0] as readonly Hex[]
+  return top.args[0]
 }
 
 /** Decodes the `liquidate(...)` calldata and the `(bytes[] queue, bytes returnData)` callback blob. */

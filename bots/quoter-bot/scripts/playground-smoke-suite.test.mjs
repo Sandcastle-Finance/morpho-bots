@@ -20,7 +20,7 @@ test('the root test command runs every Node playground suite after the Vitest un
 
   assert.equal(
     rootPackage.scripts.test,
-    'vitest run && pnpm --filter @morpho-org/quoter-bot run playground:test'
+    'vitest run && bun run --cwd bots/quoter-bot playground:test'
   )
   assert.equal(
     quoterBotPackage.scripts['playground:test'],
@@ -119,7 +119,7 @@ test('the root lint command explicitly checks the playground smoke mjs files', a
     rootPackage.scripts['lint:playground-smoke'],
     'oxlint --config bots/quoter-bot/scripts/playground-smoke.oxlintrc.json bots/quoter-bot/scripts/playground-smoke*.mjs'
   )
-  assert.match(rootPackage.scripts.lint, /pnpm run lint:playground-smoke/)
+  assert.match(rootPackage.scripts.lint, /bun run lint:playground-smoke/)
 })
 
 test('the scoped playground smoke lint config accepts clean source and rejects an injected unused import', async () => {

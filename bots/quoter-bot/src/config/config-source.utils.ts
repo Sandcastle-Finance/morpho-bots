@@ -51,7 +51,7 @@ const MAX_CONFIGURATION_SOURCE_BYTES = 1_048_576
 const MAX_YAML_DEPTH = 64
 
 const nodeFileSystem: ConfigurationFileSystem = {
-  open: async (path, flags) => (await open(path, flags)) as ConfigurationFileHandle
+  open: async (path, flags) => await open(path, flags)
 }
 
 const environmentKeys = [
@@ -93,7 +93,17 @@ const environmentKeys = [
 ] as const
 
 const yamlKeys = {
-  root: ['chain', 'identity', 'contracts', 'apis', 'markets', 'setup', 'bootstrap', 'ladder'],
+  root: [
+    'chain',
+    'identity',
+    'contracts',
+    'apis',
+    'markets',
+    'setup',
+    'redeemWithdrawable',
+    'bootstrap',
+    'ladder'
+  ],
   chain: ['id', 'rpcUrl', 'archiveRpcUrl'],
   identity: [
     'makerAddress',
@@ -358,6 +368,9 @@ const yamlSource = (input: unknown, readOnly: boolean): ConfigurationSource => {
     transactionReceiptTimeoutMs: 'TRANSACTION_RECEIPT_TIMEOUT_MS'
   })
 
+  if (root.redeemWithdrawable !== undefined)
+    values.REDEEM_WITHDRAWABLE = scalar(root.redeemWithdrawable, 'redeemWithdrawable')
+
   if (root.markets !== undefined) {
     const markets = record(root.markets, 'markets')
     rejectUnknownKeys(markets, yamlKeys.markets)
@@ -568,6 +581,7 @@ const removeOverriddenYamlValues = (input: unknown, environment: Environment) =>
       delete (group as Record<string, unknown>)[path[1]]
     }
   }
+  if (redeemWithdrawableOverride(environment) !== undefined) delete root.redeemWithdrawable
   if (environment.BOOTSTRAP_MARKETS !== undefined) delete root.bootstrap
   if (environment.LADDER_MARKETS !== undefined) delete root.ladder
   const markets = root.markets
@@ -587,6 +601,10 @@ const removeOverriddenYamlValues = (input: unknown, environment: Environment) =>
  */
 const acceptedLossFactorOverride = (environment: Environment) =>
   environment.ACCEPTED_LOSS_FACTOR?.trim() ? environment.ACCEPTED_LOSS_FACTOR : undefined
+
+/** Like `acceptedLossFactorOverride`: a blank value keeps YAML `redeemWithdrawable`. */
+const redeemWithdrawableOverride = (environment: Environment) =>
+  environment.REDEEM_WITHDRAWABLE?.trim() ? environment.REDEEM_WITHDRAWABLE : undefined
 
 const parseJsonValue = (
   name: 'BOOTSTRAP_MARKETS' | 'LADDER_MARKETS' | 'ACCEPTED_LOSS_FACTOR',
@@ -738,6 +756,8 @@ export const loadConfigurationSources = async (
   if (environment.LADDER_MARKETS !== undefined) {
     source.ladder = parseJsonValue('LADDER_MARKETS', environment.LADDER_MARKETS)
   }
+  const redeemWithdrawable = redeemWithdrawableOverride(environment)
+  if (redeemWithdrawable !== undefined) source.values.REDEEM_WITHDRAWABLE = redeemWithdrawable
   const acceptedLossFactor = acceptedLossFactorOverride(environment)
   if (acceptedLossFactor !== undefined) {
     source.acceptedLossFactor = parseJsonValue('ACCEPTED_LOSS_FACTOR', acceptedLossFactor)
@@ -774,6 +794,8 @@ export const configurationFromEnvironment = (
     )
       values[key] = environment[key]
   }
+  const redeemWithdrawable = redeemWithdrawableOverride(environment)
+  if (redeemWithdrawable !== undefined) values.REDEEM_WITHDRAWABLE = redeemWithdrawable
   let bootstrap: unknown = []
   if (environment.BOOTSTRAP_MARKETS !== undefined) {
     bootstrap = parseJsonValue('BOOTSTRAP_MARKETS', environment.BOOTSTRAP_MARKETS)

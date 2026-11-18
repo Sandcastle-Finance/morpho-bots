@@ -71,6 +71,10 @@ setup:
   requestTimeoutMs: 10000
   transactionReceiptTimeoutMs: 180000
 
+# Optional, true by default. While true, a market where the maker holds credit and Midnight holds
+# withdrawable credit redeems all of min(credit, withdrawable) at par before it quotes again.
+redeemWithdrawable: true
+
 # Integer values use decimal notation only: no floats, exponents, plus signs, or internal whitespace.
 # Asset/credit/exposure amounts are exact raw loan-asset units. Rates are integer BPS.
 bootstrap:

@@ -10,7 +10,6 @@ const fetchMarket = vi.hoisted(() => vi.fn())
 vi.mock('@morpho-org/morpho-sdk/fetch', () => ({ fetchMarket }))
 
 const marketId = '0x1111111111111111111111111111111111111111111111111111111111111111'
-const WAD = 10n ** 18n
 const SHARES_PER_ASSET = 10n ** 6n
 /** The SDK rejects accrual before a market's `lastUpdate`, so block timestamps must follow it. */
 const LAST_UPDATE = 1_700_000_000n
@@ -57,18 +56,11 @@ beforeEach(() => {
 })
 
 describe('createBlueReferenceReader', () => {
-  test('prices zeroed state identically to a funded market that has not accrued', () => {
-    // The hazard the guard exists for, asserted against the SDK rather than a restatement of its
-    // share math: Blue's virtual assets/shares make a market that does not exist at a historical
-    // block indistinguishable from one holding supply at par.
-    expect(market().toSupplyAssets(WAD)).toBe(funded(1_000_000_000n).toSupplyAssets(WAD))
-  })
-
   test('rejects a historical checkpoint whose block predates the reference market', async () => {
     fetchMarket.mockResolvedValue(market())
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => block) as never,
+      client(1_000n, block => block),
       BASE_CHAIN_ID
     )
 
@@ -84,7 +76,7 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(market({ lastUpdate: LAST_UPDATE }))
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => block) as never,
+      client(1_000n, block => block),
       BASE_CHAIN_ID
     )
 
@@ -99,14 +91,14 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(accruing)
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      client(1_000n, block => LAST_UPDATE + block * 2n),
       BASE_CHAIN_ID
     )
 
     expect(await reader.readLatest()).toMatchObject({
       blockNumber: 1_000n,
       timestamp: LAST_UPDATE + 2_000n,
-      supplyAssetsPerWadShares: accruing.toSupplyAssets(WAD)
+      supplyAssetsPerWadShares: 1_001_999_999_998n
     })
     expect(accrueInterest).toHaveBeenCalledWith(LAST_UPDATE + 2_000n)
     expect(fetchMarket).toHaveBeenCalledWith(marketId, expect.anything(), {
@@ -119,7 +111,7 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(funded(1_000_000_000n))
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      client(1_000n, block => LAST_UPDATE + block * 2n),
       BASE_CHAIN_ID
     )
 
@@ -140,7 +132,7 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(funded(1_000_000_000n))
     const readers = client(2_000n, block => LAST_UPDATE + block * 2n)
     const getBlock = vi.spyOn(readers, 'getBlock')
-    const reader = createBlueReferenceReader(marketId, readers as never, BASE_CHAIN_ID)
+    const reader = createBlueReferenceReader(marketId, readers, BASE_CHAIN_ID)
 
     expect(await reader.readAtOrBefore(LAST_UPDATE + 3_000n, head)).toMatchObject({
       blockNumber: 1_000n
@@ -152,7 +144,7 @@ describe('createBlueReferenceReader', () => {
     fetchMarket.mockResolvedValue(funded(1_000_000_000n))
     const reader = createBlueReferenceReader(
       marketId,
-      client(1_000n, block => LAST_UPDATE + block * 2n) as never,
+      client(1_000n, block => LAST_UPDATE + block * 2n),
       BASE_CHAIN_ID
     )
 
@@ -165,7 +157,7 @@ describe('createBlueReferenceReader', () => {
   test('rejects a provider whose latest block carries no number', async () => {
     const reader = createBlueReferenceReader(
       marketId,
-      { getBlock: async () => ({ number: null, timestamp: 0n }) } as never,
+      { getBlock: async () => ({ number: null, timestamp: 0n }) },
       BASE_CHAIN_ID
     )
 

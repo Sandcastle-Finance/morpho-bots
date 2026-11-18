@@ -259,9 +259,9 @@ describe('vaultV2ReallocationValidator', () => {
       'a vault or adapter is not an address'
     ]
   ] as const)('refuses to be built with %s', (_, adapters, reason) => {
-    expect(() =>
-      vaultV2ReallocationValidator({ adapters: adapters as Record<Address, Address> })
-    ).toThrow(new InvalidValidatorConfigError(reason))
+    expect(() => vaultV2ReallocationValidator({ adapters: adapters })).toThrow(
+      new InvalidValidatorConfigError(reason)
+    )
   })
 
   it('claims only transactions to a configured vault', () => {

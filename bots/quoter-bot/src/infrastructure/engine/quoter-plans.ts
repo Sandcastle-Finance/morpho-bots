@@ -12,12 +12,14 @@ import { parseIntentId } from '@repo/controller'
 import {
   midnightCancellation,
   midnightCommitmentGroup,
-  midnightPublicationPlan
+  midnightPublicationPlan,
+  midnightRedemption
 } from '@repo/validators'
 
 import type { BootstrapActPayload } from '../../application/engine/bootstrap-decision'
 import type { Act } from '../../application/engine/decision'
 import type { LadderActPayload } from '../../application/engine/ladder-decision'
+import type { RedemptionActPayload } from '../../application/engine/redemption'
 
 import { UnplannedPublicationError } from '../../errors'
 import { DRY_SIGNATURE } from '../kernel/dry-world'
@@ -40,13 +42,23 @@ const treeOf = (act: Act): TreeCreateParams | undefined =>
   act.kind === 'replace' ? (act.payload as unknown as Publication).publication.witness : undefined
 
 /**
- * The kernel steps of one act: a cancellation of the groups it names, if any, then for a
- * replacement the publication of its prepared tree, whose dependent step the materializer builds.
+ * The kernel steps of one act: a redemption's one `withdraw` of the maker's credit to the maker, or
+ * a cancellation of the groups it names, if any, then for a replacement the publication of its
+ * prepared tree, whose dependent step the materializer builds.
  * @param signing - Chain, maker, signer, and the lazily resolved ratifier kind.
  * @param act - The act to plan.
  * @returns The ordered steps; empty for a cancellation that names no group.
  */
 export const quoterSteps = (signing: QuoterSigning, act: Act): StepSpec[] => {
+  if (act.kind === 'redeem') {
+    const { params, units } = act.payload as unknown as RedemptionActPayload
+    return [
+      {
+        kind: 'tx',
+        payload: midnightRedemption(signing.chainId, signing.maker, { market: params, units })
+      }
+    ]
+  }
   const cancel = (act.payload as unknown as { cancel: readonly string[] }).cancel
   const cancellation: StepSpec[] =
     cancel.length === 0

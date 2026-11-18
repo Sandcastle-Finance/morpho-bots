@@ -1,14 +1,12 @@
-import type { Finality, LogLevel } from '@repo/kit'
+import type { KernelSettings, LogLevel } from '@repo/kit'
 import type { Venue } from '@repo/swaps'
 import type { Address, Chain, Hex } from 'viem'
 
 import { Executor } from '@repo/contracts'
-import { parseFinality } from '@repo/kit'
+import { parseKernelSettings } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 import { defineChain, getAddress, isAddress, isHex } from 'viem'
 import { base } from 'viem/chains'
-
-import { parseMaxFeeGwei } from './fee'
 
 // Enabled venues are inferred from which venue API keys are present in env. The 0x/1inch/LiFi quoting
 // adapters + the venue selector live in `@repo/swaps`.
@@ -150,11 +148,6 @@ export type VenueConfig = {
   excludeCollaterals: Address[]
 }
 
-export type KernelStoreConfig = {
-  stateDirectory: string
-  enrollment: 'enrolling' | 'enrolled'
-}
-
 /**
  * Venue-probing knobs. The probe fetches indicative quotes across enabled venues at each log-scaled
  * `ladderSizes` rung, caches the per-venue rate curve for the pair for `staleMs`, and runs on its own
@@ -169,7 +162,6 @@ export type ProbeConfig = {
 
 export type Config = {
   chainId: number
-  finality: Finality
   chain: Chain
   morpho: Address
   worldValidMs: number
@@ -184,9 +176,8 @@ export type Config = {
   /** Venue-probing knobs. */
   probe: ProbeConfig
   quoting: QuotingConfig
-  /** Where the kernel keeps the account's ledger. */
-  kernel: KernelStoreConfig
-  maxFeePerGasWei: bigint
+  /** Spend bounds are the policy's default gas ceiling priced at `MAX_FEE_GWEI`. */
+  kernel: KernelSettings
   logLevel: LogLevel
 }
 
@@ -231,7 +222,7 @@ function bigintEnv(env: Env, name: string, def: bigint): bigint {
 }
 
 // Parses an optional positive decimal env var, with a default and optional min bound. Decimal form
-// only (same regex as MAX_FEE_GWEI) — rejects hex/exponent so it agrees with the other validators.
+// only — rejects hex/exponent so it agrees with the other validators.
 function numberEnv(env: Env, name: string, def: number, bounds: { min?: number } = {}): number {
   const raw = env[name]?.trim()
   if (!raw) return def
@@ -309,26 +300,6 @@ function urlEnv(env: Env, name: string): string | undefined {
 }
 
 /**
- * `KERNEL_STATE_DIR` holds the kernel's ledger and must survive a restart. `KERNEL_ENROLLMENT` is
- * `enrolling` for the first start of a fresh account and `enrolled` for every later one.
- */
-function kernelConfig(env: Env): KernelStoreConfig {
-  const stateDirectory = required(env, 'KERNEL_STATE_DIR').trim()
-  const enrollment = required(env, 'KERNEL_ENROLLMENT').trim()
-  if (enrollment !== 'enrolling' && enrollment !== 'enrolled') {
-    throw new Error(
-      `KERNEL_ENROLLMENT must be "enrolling" or "enrolled", got: ${env.KERNEL_ENROLLMENT}`
-    )
-  }
-  if (env.POSITION_LIQUIDATION_COOLDOWN_MS?.trim()) {
-    throw new Error(
-      'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported; failed positions back off by block'
-    )
-  }
-  return { stateDirectory, enrollment }
-}
-
-/**
  * Reads the full env table into a typed, validated {@link Config}. Throws on any missing
  * required var, malformed value, or unknown `CHAIN_ID` — the bot must fail loud at startup
  * rather than run half-configured. Onchain checks (that `EXECUTOOOR_ADDRESS` and the Morpho
@@ -352,14 +323,6 @@ export function loadConfig(
     const supported = Object.keys(chainMap).join(', ') || '(none configured)'
     throw new Error(`Unsupported CHAIN_ID ${chainId}; supported chain ids: ${supported}`)
   }
-  const finalityName = `FINALITY_${chainId}`
-  const finality = parseFinality(required(env, finalityName).trim())
-  if (finality === undefined) {
-    throw new Error(
-      `${finalityName} must be safe, finalized, or a positive block depth, got: ${env[finalityName]}`
-    )
-  }
-
   const rpcUrl = required(env, 'RPC_URL')
 
   const liquidatorPrivateKey = required(env, 'LIQUIDATOR_PRIVATE_KEY')
@@ -385,13 +348,6 @@ export function loadConfig(
   const logLevel = env.LOG_LEVEL?.trim() || 'info'
   if (!isLogLevel(logLevel)) {
     throw new Error(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}, got: ${env.LOG_LEVEL}`)
-  }
-
-  const maxFeePerGasWei = parseMaxFeeGwei(required(env, 'MAX_FEE_GWEI'))
-  if (maxFeePerGasWei === undefined) {
-    throw new Error(
-      `MAX_FEE_GWEI must be a gwei amount of at least one wei, got: ${env.MAX_FEE_GWEI}`
-    )
   }
 
   // Enabled venues are inferred from which venue API keys are present — there is no per-collateral
@@ -456,9 +412,14 @@ export function loadConfig(
     healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 })
   }
 
+  if (env.POSITION_LIQUIDATION_COOLDOWN_MS?.trim()) {
+    throw new Error(
+      'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported; failed positions back off by block'
+    )
+  }
+
   return {
     chainId,
-    finality,
     chain: chainConfig.chain,
     morpho: chainConfig.morpho,
     worldValidMs: chainConfig.worldValidMs,
@@ -470,8 +431,7 @@ export function loadConfig(
     venues,
     probe,
     quoting,
-    kernel: kernelConfig(env),
-    maxFeePerGasWei,
+    kernel: parseKernelSettings(env, chainConfig.chain, { spendBounds: 'fee-cap' }),
     logLevel
   }
 }

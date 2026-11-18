@@ -47,14 +47,14 @@ Configuration is identical in every distribution: the CLI discovers `quoter-bot.
 reads the environment variables documented below — see [Configuration](#configuration). The
 [Docker image](#deploy) `morphoorg/quoter` and the workspace invocation below run the same CLI, so
 every `morpho-quoter <arguments>` example in this document can also be run as
-`pnpm --filter @morpho-org/quoter-bot run start -- <arguments>` from a repository checkout.
+`bun run --cwd bots/quoter-bot start -- <arguments>` from a repository checkout.
 
 ## Parameter playground
 
 Run the stateless parameter playground locally from the repository root:
 
 ```sh
-pnpm run quoter-bot:playground
+bun run quoter-bot:playground
 ```
 
 The launcher performs a frozen-lockfile dependency check before every build, then prints the local
@@ -62,7 +62,7 @@ server URL after building the browser artifact. For a production-equivalent
 build without starting a server, run:
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot run playground:build
+bun run --cwd bots/quoter-bot playground:build
 ```
 
 After this pull request is merged to `main`, relevant playground, browser-safe kit, package, lock,
@@ -76,22 +76,22 @@ its `github-pages` environment for deployment status.
 ## Run
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot run start -- setup-check
+bun run --cwd bots/quoter-bot start -- setup-check
 
 # Address-only setup inspection: MAKER_PRIVATE_KEY may be omitted.
-pnpm --filter @morpho-org/quoter-bot run start -- --readonly setup-check
+bun run --cwd bots/quoter-bot start -- --readonly setup-check
 
 # Explicit signer sources (root options precede the command).
-pnpm --filter @morpho-org/quoter-bot run start -- --private-key '<key>' setup-check
-pnpm --filter @morpho-org/quoter-bot run start -- --keystore ./maker.json --interactive setup-check
-pnpm --filter @morpho-org/quoter-bot run start -- --aws setup-check
+bun run --cwd bots/quoter-bot start -- --private-key '<key>' setup-check
+bun run --cwd bots/quoter-bot start -- --keystore ./maker.json --interactive setup-check
+bun run --cwd bots/quoter-bot start -- --aws setup-check
 ```
 
 For unattended keystore operation, provision `KEYSTORE_PASSWORD` separately through the deployment
 secret manager or process environment, then run the keystore command without an inline value:
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot run start -- --keystore ./maker.json setup-check
+bun run --cwd bots/quoter-bot start -- --keystore ./maker.json setup-check
 ```
 
 `--private-key <key>` and `--password <password>` remain available for explicit automation, but they
@@ -101,46 +101,46 @@ place secrets in argv, where process listings and shell history may expose them.
 
 ```sh
 # Emit compact JSON Lines for automation instead of the default human-readable output.
-pnpm --filter @morpho-org/quoter-bot run start -- --json setup-check
+bun run --cwd bots/quoter-bot start -- --json setup-check
 
 # One live position-bootstrap cycle.
-pnpm --filter @morpho-org/quoter-bot run start -- bootstrap
+bun run --cwd bots/quoter-bot start -- bootstrap
 
 # One address-only cycle that logs desired make operations without submitting them.
-pnpm --filter @morpho-org/quoter-bot run start -- --readonly bootstrap
+bun run --cwd bots/quoter-bot start -- --readonly bootstrap
 
 # Repeat bootstrap every minute; SIGINT/SIGTERM drains the current cycle and removes owned offers.
-pnpm --filter @morpho-org/quoter-bot run start -- bootstrap --monitor
+bun run --cwd bots/quoter-bot start -- bootstrap --monitor
 
 # Stream full safe diagnostics and emit publication/cancellation hashes as soon as submitted.
-pnpm --filter @morpho-org/quoter-bot run start -- bootstrap --monitor --verbose
+bun run --cwd bots/quoter-bot start -- bootstrap --monitor --verbose
 
 # Exercise the complete monitor and cleanup lifecycle without signing or submitting.
-pnpm --filter @morpho-org/quoter-bot run start -- --readonly bootstrap --monitor
+bun run --cwd bots/quoter-bot start -- --readonly bootstrap --monitor
 
 # Validate and continuously render ladder decisions without loading a private key or submitting.
-pnpm --filter @morpho-org/quoter-bot run start -- ladder --monitor --verbose --readonly
+bun run --cwd bots/quoter-bot start -- ladder --monitor --verbose --readonly
 
 # Sign, broadcast, and confirm one ladder reconciliation cycle.
-pnpm --filter @morpho-org/quoter-bot run start -- ladder
+bun run --cwd bots/quoter-bot start -- ladder
 
 # Continuously reconcile the live ladder and remove owned offers on SIGINT/SIGTERM.
-pnpm --filter @morpho-org/quoter-bot run start -- ladder --monitor --verbose
+bun run --cwd bots/quoter-bot start -- ladder --monitor --verbose
 
 # Run setup checks, bootstrap, and ladder monitoring together until SIGINT/SIGTERM.
-pnpm --filter @morpho-org/quoter-bot run start -- start --verbose
+bun run --cwd bots/quoter-bot start -- start --verbose
 
 # Exercise the same combined lifecycle without signing or submitting transactions.
-pnpm --filter @morpho-org/quoter-bot run start -- --readonly start --verbose
+bun run --cwd bots/quoter-bot start -- --readonly start --verbose
 
 # Cancel every active offer group for the configured maker.
-pnpm --filter @morpho-org/quoter-bot run start -- invalidate
+bun run --cwd bots/quoter-bot start -- invalidate
 
 # Cancel one explicit offer group, even when it has not been indexed by the API.
-pnpm --filter @morpho-org/quoter-bot run start -- invalidate 0x<64-hex-characters>
+bun run --cwd bots/quoter-bot start -- invalidate 0x<64-hex-characters>
 
 # Preview the active groups that maker-wide invalidation would cancel.
-pnpm --filter @morpho-org/quoter-bot run start -- invalidate --readonly
+bun run --cwd bots/quoter-bot start -- invalidate --readonly
 ```
 
 Success exits zero and writes human-readable output to standard output. Add the root `--json` flag for
@@ -249,7 +249,7 @@ group as one `setConsumed` call, so `MAX_BATCH_CANCELLATION_GAS` and
 
 For a maker with at least 101 USDC of both available balance and accrued credit, this
 one-rung-per-side preset caps each side at 150 USDC. USDC uses six decimals, so `150000000` is 150
-USDC and `101000000` is the Router-compatible 101 USDC offer floor. Duplicate the exact market ID
+USDC and `101000000` is a 101 USDC offer floor. Duplicate the exact market ID
 already present in `MARKET_IDS`. This legacy preset intentionally omits `targetRate`, so it uses the
 backward-compatible `variable_rate_avg` default:
 
@@ -261,13 +261,13 @@ Run the exact read-only monitor command first to inspect whether current cash/cr
 produces a lower side, a higher side, or both:
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot run start -- ladder --monitor --verbose --readonly
+bun run --cwd bots/quoter-bot start -- ladder --monitor --verbose --readonly
 ```
 
 Version output remains available:
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot run start -- --version
+bun run --cwd bots/quoter-bot start -- --version
 ```
 
 ## Signing kernel
@@ -281,6 +281,9 @@ broadcasts outside it.
 - **Ledger.** `$XDG_STATE_HOME/morpho-quoter-bot/kernel-<chain>-<signer>.json`, written and fsynced
   before every irreversible act. Run one replica per ledger volume: two processes on one ledger are
   not detected.
+- **Journal.** `$XDG_STATE_HOME/morpho-quoter-bot/journal`, one file per run. To get a run's
+  journal after an incident, ask Platform to follow
+  [Copy a run's journal off a bot pod](../../docs/JOURNAL-RETRIEVAL.md).
 - **Enrollment.** Set `KERNEL_ENROLLMENT=enrolling` for the first start of a fresh signer, then
   `enrolled` for every later start. An enrolled start that finds no ledger (a lost volume) refuses
   to start, as does an enrolling start that finds one.
@@ -303,7 +306,7 @@ broadcasts outside it.
 
 The package owns its production [Dockerfile](./Dockerfile), local
 [docker-compose.yml](./docker-compose.yml), and Kubernetes [Helm chart](./helm/quoter-bot). The
-Docker build context is the repository root so pnpm can resolve every workspace dependency; a build
+Docker build context is the repository root so Bun can resolve every workspace dependency; a build
 stage compiles the workspace, and the runtime stage ships only this bot's self-contained bundle —
 no other bot's code, workspace source, or package manager. The image runs the combined setup,
 bootstrap, and ladder monitor directly as the unprivileged `node` user.
@@ -339,7 +342,7 @@ A production release also publishes the CLI to npm as
 workflow there — standalone because npm trusted publishing validates the top-level workflow
 filename — verifies that the tagged commit is a mirror release snapshot on first-parent `main`,
 stages the package with
-`pnpm --filter @morpho-org/quoter-bot run npm:pack`, smoke-tests that the staged CLI reports the
+`bun run --cwd bots/quoter-bot npm:pack`, smoke-tests that the staged CLI reports the
 staged manifest version, and publishes through npm trusted publishing (OIDC), so CI stores no npm
 token. Every publish carries a provenance attestation naming the release commit: a tag push's
 event commit is that commit, and a recovery dispatch must select the release tag as the workflow
@@ -358,7 +361,7 @@ publish under `backfill`.
 
 One-time setup: npm cannot create a brand-new package through trusted publishing, so a maintainer
 bootstraps the first publish manually
-(`pnpm --filter @morpho-org/quoter-bot run npm:pack && npm publish bots/quoter-bot/dist/npm` from
+(`bun run --cwd bots/quoter-bot npm:pack && npm publish bots/quoter-bot/dist/npm` from
 the repository root), then configures the package's trusted publisher on npmjs.com (repository
 `morpho-org/morpho-bots`, workflow `publish-quoter-bot-npm.yml`, environment `quoter-bot-npm`) and
 creates the `quoter-bot-npm` GitHub Environment there with its deployment policy scoped to
@@ -434,13 +437,13 @@ example filename.
 
 ```sh
 # Explicit file; relative paths resolve from the invocation working directory.
-pnpm --filter @morpho-org/quoter-bot run start -- --config ./quoter-bot.yml setup-check
+bun run --cwd bots/quoter-bot start -- --config ./quoter-bot.yml setup-check
 
 # Default discovery in the current working directory.
-pnpm --filter @morpho-org/quoter-bot run start -- setup-check
+bun run --cwd bots/quoter-bot start -- setup-check
 
 # Address-only mode works with either configuration source.
-pnpm --filter @morpho-org/quoter-bot run start -- --readonly setup-check
+bun run --cwd bots/quoter-bot start -- --readonly setup-check
 ```
 
 Two unit conventions apply everywhere: amounts are **raw loan-token units** (for six-decimal USDC,
@@ -451,53 +454,54 @@ Two unit conventions apply everywhere: amounts are **raw loan-token units** (for
 Every supported environment variable is listed below. “Raw assets” means the loan token's smallest
 unit; for six-decimal USDC, `101000000` is 101 USDC. No value is inferred from another variable.
 
-| Environment variable                | YAML key                              | Requirement and behavior                                                                                                                                                                                                                                                                                                                                                                                               |
-| ----------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHAIN_ID`                          | `chain.id`                            | Required. Must be `1` (Ethereum mainnet) or `8453` (Base); all protocol, token, market, and transaction operations run on the selected chain.                                                                                                                                                                                                                                                                          |
-| `RPC_URL`                           | `chain.rpcUrl`                        | Required. Current-state JSON-RPC endpoint for the configured chain, used for blocks, balances, allowances, positions, contract reads, simulation, transaction submission, and receipts.                                                                                                                                                                                                                                |
-| `REFERENCE_RPC_URL`                 | `chain.archiveRpcUrl`                 | Required when the selected command has an active `variable_rate_avg` target. Archive-capable JSON-RPC endpoint for the configured chain, used to read the reference Morpho Blue Market at historical blocks. It must retain state for at least `REFERENCE_LOOKBACK_SECONDS`.                                                                                                                                           |
-| `MAKER_ADDRESS`                     | `identity.makerAddress`               | Required. Funded principal retained as every offer maker and Midnight `onBehalf` value. It must match a local or keystore signer and differ from an AWS signer.                                                                                                                                                                                                                                                        |
-| `KEY_STORAGE_METHOD`                | `identity.keyStorageMethod`           | Optional only for backward-compatible `MAKER_PRIVATE_KEY` use; otherwise `private-key`, `keystore`, or `aws`. Exactly one effective source is required in write mode.                                                                                                                                                                                                                                                  |
-| `MAKER_PRIVATE_KEY`                 | `identity.makerPrivateKey`            | Local private-key source. Must be a 0x-prefixed 32-byte secp256k1 key. `--private-key` overrides config. Never include it in committed configuration or logs.                                                                                                                                                                                                                                                          |
-| `KEYSTORE_PATH`                     | `identity.keystorePath`               | Encrypted Web3 Secret Storage file used by the `keystore` method. CLI equivalent: `--keystore <path>`.                                                                                                                                                                                                                                                                                                                 |
-| `KEYSTORE_PASSWORD`                 | `identity.keystorePassword`           | Keystore password. Exactly one direct or interactive mode is required; see the argv exposure warning above. Never logged or included in diagnostics.                                                                                                                                                                                                                                                                   |
-| `KEYSTORE_INTERACTIVE`              | `identity.keystoreInteractive`        | `true` prompts without echoing for the keystore password; CLI equivalent: `--interactive`. Not suitable for unattended deployment.                                                                                                                                                                                                                                                                                     |
-| `AWS_KMS_KEY_ID`                    | `identity.awsKmsKeyId`                | KMS key ID/ARN/alias for a distinct asymmetric `ECC_SECG_P256K1` signer. The bot calls KMS directly. `--aws` selects this backend.                                                                                                                                                                                                                                                                                     |
-| `AWS_REGION`                        | `identity.awsRegion`                  | AWS region containing the KMS key. AWS credentials use the standard AWS SDK credential chain.                                                                                                                                                                                                                                                                                                                          |
-| `MIDNIGHT_ADDRESS`                  | `contracts.midnightAddress`           | Required. Expected deployed Midnight singleton. Setup verifies its bytecode before a writer starts.                                                                                                                                                                                                                                                                                                                    |
-| `LOAN_ASSET_ADDRESS`                | `contracts.loanAssetAddress`          | Required. Loan token used by every configured Midnight Market. Balances, allowances, budgets, offer sizes, and exposure values use this token's raw units.                                                                                                                                                                                                                                                             |
-| `RATIFIER_ADDRESS`                  | `contracts.ratifierAddress`           | Required. Canonical SDK ratifier authorized by the maker. AWS mode requires Ecrecover; local and keystore modes may use Ecrecover or Setter.                                                                                                                                                                                                                                                                           |
-| `MORPHO_API_BASE_URL`               | `apis.morphoBaseUrl`                  | Required. Morpho API origin used for Midnight books, market metadata, prospective-offer validation, and cursor-paginated maker offer groups. No API-key header is supported.                                                                                                                                                                                                                                           |
-| `ROUTER_API_BASE_URL`               | `apis.routerBaseUrl`                  | Deprecated compatibility key. Accepted and ignored; ratifier identity comes from the pinned Morpho SDK catalog.                                                                                                                                                                                                                                                                                                        |
-| `MARKET_IDS`                        | `markets.allowlist`                   | Required comma-separated list of unique 0x-prefixed bytes32 Midnight Market IDs. Every bootstrap or ladder `marketId` must appear here.                                                                                                                                                                                                                                                                                |
-| `REFERENCE_MARKET_ID`               | `markets.referenceMarketId`           | Required when the selected command has an active `variable_rate_avg` target. Must be a 0x-prefixed bytes32 Morpho Blue Market ID.                                                                                                                                                                                                                                                                                      |
-| `REFERENCE_LOOKBACK_SECONDS`        | `markets.referenceLookbackSeconds`    | Optional window, in seconds, that the `variable_rate_avg` target averages the reference market over; defaults to `259200` (three days) and accepts `3600` through `2592000`. Widening it trades responsiveness for immunity to transient spikes that can walk the ladder into the resting book. The archive endpoint must retain state for the whole window.                                                           |
-| `V0_OFFER_GROUP_IDS`                | `markets.v0OfferGroupIds`             | Optional comma-separated list of unique, explicitly strategy-owned bytes32 offer-group IDs; defaults to empty. Use it to adopt known pre-existing groups safely.                                                                                                                                                                                                                                                       |
-| `NATIVE_RESERVE_WEI`                | `setup.nativeReserveWei`              | Required unsigned integer in read-only mode, and positive in private-key or keystore write mode. Minimum maker native-token balance, in wei, required by readiness for transaction fees. Ignored in AWS write mode, where the maker sends no transactions.                                                                                                                                                             |
-| `SIGNER_NATIVE_RESERVE_WEI`         | `setup.signerNativeReserveWei`        | Required positive integer in AWS write mode. Minimum signer native-token balance in wei.                                                                                                                                                                                                                                                                                                                               |
-| `MAX_FEE_GWEI`                      | `setup.maxFeeGwei`                    | Required positive decimal gwei in write mode. Maximum EIP-1559 fee per gas. Keep it well above twice the chain's base fee: once it clamps a first send, the first bump drops.                                                                                                                                                                                                                                          |
-| `MAX_TRANSACTION_SPEND_WEI`         | `setup.maxTransactionSpendWei`        | Required positive integer in write mode. Maximum `gas × maxFeePerGas` for one transaction.                                                                                                                                                                                                                                                                                                                             |
-| `MAX_PUBLICATION_GAS`               | `setup.maxPublicationGas`             | Required positive integer in write mode. Publication gas ceiling.                                                                                                                                                                                                                                                                                                                                                      |
-| `MAX_PUBLICATION_DATA_BYTES`        | `setup.maxPublicationDataBytes`       | Required positive integer in write mode. Publication calldata ceiling.                                                                                                                                                                                                                                                                                                                                                 |
-| `MAX_CANCELLATION_GAS`              | `setup.maxCancellationGas`            | Required positive integer in write mode. Single-cancellation gas ceiling.                                                                                                                                                                                                                                                                                                                                              |
-| `MAX_BATCH_CANCELLATION_GAS`        | `setup.maxBatchCancellationGas`       | Required positive integer in write mode. Batch-cancellation gas ceiling.                                                                                                                                                                                                                                                                                                                                               |
-| `MAX_BATCH_CANCELLATION_DATA_BYTES` | `setup.maxBatchCancellationDataBytes` | Required positive integer in write mode. Batch-cancellation calldata ceiling.                                                                                                                                                                                                                                                                                                                                          |
-| `MAX_RATIFICATION_GAS`              | `setup.maxRatificationGas`            | Required only for local or keystore Setter mode. Setter ratification gas ceiling.                                                                                                                                                                                                                                                                                                                                      |
-| `MAX_CONTINUOUS_FEE_CAP`            | `setup.maxContinuousFeeCap`           | Optional unsigned integer, at most and by default the protocol's `MAX_CONTINUOUS_FEE` (317097919). The highest market continuous fee per second that any signed offer may accept; the kernel refuses an offer above it.                                                                                                                                                                                                |
-| `KERNEL_ENROLLMENT`                 | `setup.kernelEnrollment`              | Required in write mode: `enrolling` for the first start of a fresh signer, `enrolled` for every later one. See [Signing kernel](#signing-kernel).                                                                                                                                                                                                                                                                      |
-| `FINALITY`                          | `setup.finality`                      | Optional. `safe` (the default), `finalized`, or a positive block depth: when the kernel treats a block, and so a withdrawal, as final.                                                                                                                                                                                                                                                                                 |
-| `JOURNAL_RUN_CAP_BYTES`             | none                                  | Optional, 1073741824 (1 GiB) by default, at least 67108864. The size at which a run's journal file under `$XDG_STATE_HOME/morpho-quoter-bot/journal` stops the bot cleanly (`journal.capped`) so its next start opens a new file. A start deletes earlier runs' files beyond three caps (`journal.pruned`).                                                                                                            |
-| `BUILD_REVISION`                    | none                                  | The git commit the journal and every shipped record name (`revision`). The Docker image and the npm bundle are stamped with it at build time; set it only to override the stamp. A build with no stamp refuses to quote until it is set.                                                                                                                                                                               |
-| `BUILD_IMAGE_TAG`                   | none                                  | The image tag the journal and every shipped record name (`imageTag`); stamped at build time like `BUILD_REVISION`, `quoter-bot-<version>` for the npm bundle.                                                                                                                                                                                                                                                          |
-| `REQUEST_TIMEOUT_MS`                | `setup.requestTimeoutMs`              | Optional provider-operation and aggregate pagination timeout in milliseconds. Defaults to `10000`; accepted range is `1` through `120000`.                                                                                                                                                                                                                                                                             |
-| `TRANSACTION_RECEIPT_TIMEOUT_MS`    | `setup.transactionReceiptTimeoutMs`   | Optional timeout for confirming an already-submitted transaction, in milliseconds. Defaults to `180000`; accepted range is `1` through `900000`.                                                                                                                                                                                                                                                                       |
-| `BOOTSTRAP_MARKETS`                 | `bootstrap`                           | Optional exact JSON array of position-bootstrap entries documented below; defaults to `[]` and replaces the complete YAML `bootstrap` list when supplied.                                                                                                                                                                                                                                                              |
-| `LADDER_MARKETS`                    | `ladder`                              | Optional exact JSON array of ladder entries documented below; defaults to `[]` and replaces the complete YAML `ladder` list when supplied.                                                                                                                                                                                                                                                                             |
-| `ACCEPTED_LOSS_FACTOR`              | `markets.acceptedLossFactor`          | Optional JSON object (YAML mapping) from allowlisted market id to its accepted loss factor as a canonical unsigned decimal string, below `type(uint128).max`. An omitted market accepts `0`; lending on a market halts whenever its loss factor differs. Replaces the complete YAML mapping when non-empty; an empty value (as Compose forwards an unset one) is ignored. See [Loss-factor guard](#loss-factor-guard). |
-| `BETTERSTACK_SOURCE_TOKEN`          | —                                     | Optional Better Stack source token. Must be set together with `BETTERSTACK_INGESTING_HOST`; partial configuration emits `logship.misconfigured` and ships nothing.                                                                                                                                                                                                                                                     |
-| `BETTERSTACK_INGESTING_HOST`        | —                                     | Optional Better Stack ingest host, with or without an `https://` prefix. Must be set together with `BETTERSTACK_SOURCE_TOKEN`.                                                                                                                                                                                                                                                                                         |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`       | —                                     | Optional OTLP/HTTP base endpoint enabling OpenTelemetry trace and metric export. Unset disables telemetry entirely; the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` variants enable one signal alone. The value may embed an access token and is never logged.                                                                                                               |
-| `OTEL_EXPORTER_OTLP_HEADERS`        | —                                     | Optional comma-separated `key=value` request headers for the OTLP endpoint (typically authorization). Read by the exporter only and never logged.                                                                                                                                                                                                                                                                      |
+| Environment variable                | YAML key                              | Requirement and behavior                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CHAIN_ID`                          | `chain.id`                            | Required. Must be `1` (Ethereum mainnet) or `8453` (Base); all protocol, token, market, and transaction operations run on the selected chain.                                                                                                                                                                                                                                                                                                          |
+| `RPC_URL`                           | `chain.rpcUrl`                        | Required. Current-state JSON-RPC endpoint for the configured chain, used for blocks, balances, allowances, positions, contract reads, simulation, transaction submission, and receipts.                                                                                                                                                                                                                                                                |
+| `REFERENCE_RPC_URL`                 | `chain.archiveRpcUrl`                 | Required when the selected command has an active `variable_rate_avg` target. Archive-capable JSON-RPC endpoint for the configured chain, used to read the reference Morpho Blue Market at historical blocks. It must retain state for at least `REFERENCE_LOOKBACK_SECONDS`.                                                                                                                                                                           |
+| `MAKER_ADDRESS`                     | `identity.makerAddress`               | Required. Funded principal retained as every offer maker and Midnight `onBehalf` value. It must match a local or keystore signer and differ from an AWS signer.                                                                                                                                                                                                                                                                                        |
+| `KEY_STORAGE_METHOD`                | `identity.keyStorageMethod`           | Optional only for backward-compatible `MAKER_PRIVATE_KEY` use; otherwise `private-key`, `keystore`, or `aws`. Exactly one effective source is required in write mode.                                                                                                                                                                                                                                                                                  |
+| `MAKER_PRIVATE_KEY`                 | `identity.makerPrivateKey`            | Local private-key source. Must be a 0x-prefixed 32-byte secp256k1 key. `--private-key` overrides config. Never include it in committed configuration or logs.                                                                                                                                                                                                                                                                                          |
+| `KEYSTORE_PATH`                     | `identity.keystorePath`               | Encrypted Web3 Secret Storage file used by the `keystore` method. CLI equivalent: `--keystore <path>`.                                                                                                                                                                                                                                                                                                                                                 |
+| `KEYSTORE_PASSWORD`                 | `identity.keystorePassword`           | Keystore password. Exactly one direct or interactive mode is required; see the argv exposure warning above. Never logged or included in diagnostics.                                                                                                                                                                                                                                                                                                   |
+| `KEYSTORE_INTERACTIVE`              | `identity.keystoreInteractive`        | `true` prompts without echoing for the keystore password; CLI equivalent: `--interactive`. Not suitable for unattended deployment.                                                                                                                                                                                                                                                                                                                     |
+| `AWS_KMS_KEY_ID`                    | `identity.awsKmsKeyId`                | KMS key ID/ARN/alias for a distinct asymmetric `ECC_SECG_P256K1` signer. The bot calls KMS directly. `--aws` selects this backend.                                                                                                                                                                                                                                                                                                                     |
+| `AWS_REGION`                        | `identity.awsRegion`                  | AWS region containing the KMS key. AWS credentials use the standard AWS SDK credential chain.                                                                                                                                                                                                                                                                                                                                                          |
+| `MIDNIGHT_ADDRESS`                  | `contracts.midnightAddress`           | Required. Expected deployed Midnight singleton. Setup verifies its bytecode before a writer starts.                                                                                                                                                                                                                                                                                                                                                    |
+| `LOAN_ASSET_ADDRESS`                | `contracts.loanAssetAddress`          | Required. Loan token used by every configured Midnight Market. Balances, allowances, budgets, offer sizes, and exposure values use this token's raw units.                                                                                                                                                                                                                                                                                             |
+| `RATIFIER_ADDRESS`                  | `contracts.ratifierAddress`           | Required. Canonical SDK ratifier authorized by the maker. AWS mode requires Ecrecover; local and keystore modes may use Ecrecover or Setter.                                                                                                                                                                                                                                                                                                           |
+| `MORPHO_API_BASE_URL`               | `apis.morphoBaseUrl`                  | Required. Morpho API origin used for Midnight books, market metadata, prospective-offer validation, and cursor-paginated maker offer groups. No API-key header is supported.                                                                                                                                                                                                                                                                           |
+| `ROUTER_API_BASE_URL`               | `apis.routerBaseUrl`                  | Deprecated compatibility key. Accepted and ignored; ratifier identity comes from the pinned Morpho SDK catalog.                                                                                                                                                                                                                                                                                                                                        |
+| `MARKET_IDS`                        | `markets.allowlist`                   | Required comma-separated list of unique 0x-prefixed bytes32 Midnight Market IDs. Every bootstrap or ladder `marketId` must appear here.                                                                                                                                                                                                                                                                                                                |
+| `REFERENCE_MARKET_ID`               | `markets.referenceMarketId`           | Required when the selected command has an active `variable_rate_avg` target. Must be a 0x-prefixed bytes32 Morpho Blue Market ID.                                                                                                                                                                                                                                                                                                                      |
+| `REFERENCE_LOOKBACK_SECONDS`        | `markets.referenceLookbackSeconds`    | Optional window, in seconds, that the `variable_rate_avg` target averages the reference market over; defaults to `259200` (three days) and accepts `3600` through `2592000`. Widening it trades responsiveness for immunity to transient spikes that can walk the ladder into the resting book. The archive endpoint must retain state for the whole window.                                                                                           |
+| `V0_OFFER_GROUP_IDS`                | `markets.v0OfferGroupIds`             | Optional comma-separated list of unique, explicitly strategy-owned bytes32 offer-group IDs; defaults to empty. Use it to adopt known pre-existing groups safely.                                                                                                                                                                                                                                                                                       |
+| `NATIVE_RESERVE_WEI`                | `setup.nativeReserveWei`              | Required unsigned integer in read-only mode, and positive in private-key or keystore write mode. Minimum maker native-token balance, in wei, required by readiness for transaction fees. Ignored in AWS write mode, where the maker sends no transactions.                                                                                                                                                                                             |
+| `SIGNER_NATIVE_RESERVE_WEI`         | `setup.signerNativeReserveWei`        | Required positive integer in AWS write mode. Minimum signer native-token balance in wei.                                                                                                                                                                                                                                                                                                                                                               |
+| `MAX_FEE_GWEI`                      | `setup.maxFeeGwei`                    | Required positive decimal gwei in write mode. Maximum EIP-1559 fee per gas. Keep it well above twice the chain's base fee: once it clamps a first send, the first bump drops. Startup refuses a cap that leaves no room for a bid under `MAX_TRANSACTION_SPEND_WEI`, such as 1 wei.                                                                                                                                                                    |
+| `MAX_TRANSACTION_SPEND_WEI`         | `setup.maxTransactionSpendWei`        | Required positive integer in write mode. Maximum `gas × maxFeePerGas` for one transaction.                                                                                                                                                                                                                                                                                                                                                             |
+| `MAX_PUBLICATION_GAS`               | `setup.maxPublicationGas`             | Required positive integer in write mode. Publication gas ceiling.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `MAX_PUBLICATION_DATA_BYTES`        | `setup.maxPublicationDataBytes`       | Required positive integer in write mode. Publication calldata ceiling.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `MAX_CANCELLATION_GAS`              | `setup.maxCancellationGas`            | Required positive integer in write mode. Single-cancellation gas ceiling.                                                                                                                                                                                                                                                                                                                                                                              |
+| `MAX_BATCH_CANCELLATION_GAS`        | `setup.maxBatchCancellationGas`       | Required positive integer in write mode. Batch-cancellation gas ceiling.                                                                                                                                                                                                                                                                                                                                                                               |
+| `MAX_BATCH_CANCELLATION_DATA_BYTES` | `setup.maxBatchCancellationDataBytes` | Required positive integer in write mode. Batch-cancellation calldata ceiling.                                                                                                                                                                                                                                                                                                                                                                          |
+| `MAX_RATIFICATION_GAS`              | `setup.maxRatificationGas`            | Required only for local or keystore Setter mode. Setter ratification gas ceiling.                                                                                                                                                                                                                                                                                                                                                                      |
+| `MAX_CONTINUOUS_FEE_CAP`            | `setup.maxContinuousFeeCap`           | Optional unsigned integer, at most and by default the protocol's `MAX_CONTINUOUS_FEE` (317097919). The highest market continuous fee per second that any signed offer may accept; the kernel refuses an offer above it.                                                                                                                                                                                                                                |
+| `REDEEM_WITHDRAWABLE`               | `redeemWithdrawable`                  | Optional, `true` by default. While `true`, a market where the maker holds credit and Midnight holds withdrawable credit redeems all of `min(credit, withdrawable)` at par before it quotes again. A bootstrap without `autoRefill` is redeemed like any other market, so after a restart it may lend up to its `creditTarget` again; set `false` to hold its credit. `--readonly` logs the redemption and sends nothing. `false` turns redemption off. |
+| `KERNEL_ENROLLMENT`                 | `setup.kernelEnrollment`              | Required in write mode: `enrolling` for the first start of a fresh signer, `enrolled` for every later one. See [Signing kernel](#signing-kernel).                                                                                                                                                                                                                                                                                                      |
+| `FINALITY`                          | `setup.finality`                      | Optional. `safe` (the default), `finalized`, or a positive block depth below the chain's reorg window (128 blocks on mainnet, 3,000 on Base): when the kernel treats a block, and so a withdrawal, as final. Startup refuses a deeper one.                                                                                                                                                                                                             |
+| `JOURNAL_RUN_CAP_BYTES`             | none                                  | Optional, 1073741824 (1 GiB) by default, at least 67108864. The size at which a run's journal file under `$XDG_STATE_HOME/morpho-quoter-bot/journal` stops the bot cleanly (`journal.capped`) so its next start opens a new file. A start deletes earlier runs' files beyond three caps (`journal.pruned`).                                                                                                                                            |
+| `BUILD_REVISION`                    | none                                  | The git commit the journal and every shipped record name (`revision`). The Docker image and the npm bundle are stamped with it at build time; set it only to override the stamp. A build with no stamp refuses to quote until it is set.                                                                                                                                                                                                               |
+| `BUILD_IMAGE_TAG`                   | none                                  | The image tag the journal and every shipped record name (`imageTag`); stamped at build time like `BUILD_REVISION`, `quoter-bot-<version>` for the npm bundle.                                                                                                                                                                                                                                                                                          |
+| `REQUEST_TIMEOUT_MS`                | `setup.requestTimeoutMs`              | Optional provider-operation and aggregate pagination timeout in milliseconds. Defaults to `10000`; accepted range is `1` through `120000`.                                                                                                                                                                                                                                                                                                             |
+| `TRANSACTION_RECEIPT_TIMEOUT_MS`    | `setup.transactionReceiptTimeoutMs`   | Optional timeout for confirming an already-submitted transaction, in milliseconds. Defaults to `180000`; accepted range is `1` through `900000`.                                                                                                                                                                                                                                                                                                       |
+| `BOOTSTRAP_MARKETS`                 | `bootstrap`                           | Optional exact JSON array of position-bootstrap entries documented below; defaults to `[]` and replaces the complete YAML `bootstrap` list when supplied.                                                                                                                                                                                                                                                                                              |
+| `LADDER_MARKETS`                    | `ladder`                              | Optional exact JSON array of ladder entries documented below; defaults to `[]` and replaces the complete YAML `ladder` list when supplied.                                                                                                                                                                                                                                                                                                             |
+| `ACCEPTED_LOSS_FACTOR`              | `markets.acceptedLossFactor`          | Optional JSON object (YAML mapping) from allowlisted market id to its accepted loss factor as a canonical unsigned decimal string, below `type(uint128).max`. An omitted market accepts `0`; lending on a market halts whenever its loss factor differs. Replaces the complete YAML mapping when non-empty; an empty value (as Compose forwards an unset one) is ignored. See [Loss-factor guard](#loss-factor-guard).                                 |
+| `BETTERSTACK_SOURCE_TOKEN`          | —                                     | Optional Better Stack source token. Must be set together with `BETTERSTACK_INGESTING_HOST`; partial configuration emits `logship.misconfigured` and ships nothing.                                                                                                                                                                                                                                                                                     |
+| `BETTERSTACK_INGESTING_HOST`        | —                                     | Optional Better Stack ingest host, with or without an `https://` prefix. Must be set together with `BETTERSTACK_SOURCE_TOKEN`.                                                                                                                                                                                                                                                                                                                         |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`       | —                                     | Optional OTLP/HTTP base endpoint enabling OpenTelemetry trace and metric export. Unset disables telemetry entirely; the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` variants enable one signal alone. The value may embed an access token and is never logged.                                                                                                                                               |
+| `OTEL_EXPORTER_OTLP_HEADERS`        | —                                     | Optional comma-separated `key=value` request headers for the OTLP endpoint (typically authorization). Read by the exporter only and never logged.                                                                                                                                                                                                                                                                                                      |
 
 There is no separate Mempool endpoint or API-key field. Books and cursor-paginated maker offer groups
 are read through `MORPHO_API_BASE_URL`. Ratifier identity is validated from the pinned Morpho SDK
@@ -531,6 +535,13 @@ consumer can pin the contract; it is bumped only on a breaking field rename or r
 Unexpected failures include only a sanitized `errorName`; private keys, RPC/API credentials, signed
 or raw transaction payloads, provider payloads, and untrusted raw error messages are never added to
 observability records.
+
+The `live.*` lines (`live.graph`, `live.flow`, `live.record`, `live.snapshot`, `live.gap`) are the
+live log (`declareLiveLog` in `@repo/kit`), shipped through the same logger: the graph's nodes and
+edges, and what changed in it at each step, read back by the live view. They name nodes, keys and statuses, and show only the
+values of `quoter.acts.phase` (each market's phase) and `kernel.health`. They are a versioned
+protocol between kit and the live view, not monitoring records, and are not shipped when shipping is
+off.
 
 Useful Better Stack source queries/filters include:
 
@@ -573,9 +584,12 @@ no field is human-scaled — resolve decimals downstream from the `loanAsset` ad
 | `book.observed`                  | A verbose ladder cycle observed post-check market state (both sides always)                               | `marketId`, `side`, `state`, `rungs`, `totalUnits`, `bestRateBps?`, `worstRateBps?`, `centerRateBps?`                                                                                                                                                                  |
 | `offer.consumed`                 | A group's monotonic `consumed` grew since the previous cycle                                              | `marketId`, `side`, `consumedDeltaUnits`, `groupRateBps`, `remainingUnits`, `groupId` _(trace only)_                                                                                                                                                                   |
 | `transaction.settled`            | A submitted transaction confirmed; `marketId` is absent for strategy-wide halt/invalidation cancellations | `workflow`, `marketId?`, `operation`, `txHash` _(trace only)_                                                                                                                                                                                                          |
+| `position.redeemed`              | A redemption withdrew the maker's credit at par and confirmed                                             | `workflow`, `marketId`, `redeemedUnits`, `txHash` _(trace only)_                                                                                                                                                                                                       |
 | `setup.check-failed`             | One named setup check failed, blocking readiness                                                          | `check`, `status`                                                                                                                                                                                                                                                      |
 | `setup.check-warning`            | One named setup check warned without blocking readiness                                                   | `check`, `status`                                                                                                                                                                                                                                                      |
 | `signer.policy_violation`        | The signer's policy refused a transaction the kernel asked it to sign                                     | `check`, `reason`, `to`, `nonce`                                                                                                                                                                                                                                       |
+| `signer.balance`                 | A writer's signer native balance, about once a minute                                                     | `address`, `balanceWei`, `balanceEth`                                                                                                                                                                                                                                  |
+| `signer.balance_failed`          | The signer balance read failed                                                                            | `address`, `status: failed`                                                                                                                                                                                                                                            |
 
 Borrowing markets also report `debtAssets?` and `debtCeilingAssets?` on `position.observed`.
 
@@ -670,7 +684,9 @@ Their attributes are restricted to the safe grouping dimensions listed above plu
 `groupId`, and `errorName` never become metric attributes. The semconv
 `http.client.request.duration` histogram is the one instrument outside that vocabulary, carrying
 the standard bounded HTTP client dimensions (method, status code, server address/port, URL
-scheme, class-of-error `error.type`) and never a path, query, or free-form text. `*_assets` and
+scheme, `network.protocol.version` (`1.1` or `2`), and `error.type` — the HTTP status code as a
+string for responses >=400, or a low-cardinality error class for non-cancellation request
+failures) and never a path, query, or free-form text. `*_assets` and
 `*_bps` values are raw smallest-unit integers converted to floating point (magnitudes beyond 2^53
 lose precision but keep scale). The book `*_rate_bps` gauges exist only while that side is
 quoting: an empty side drops its rate data points rather than freezing the last published rate,
@@ -710,8 +726,8 @@ does not provision or claim a deployed collector or dashboard.
 
 ### YAML schema
 
-The root accepts exactly `chain`, `identity`, `contracts`, `apis`, `markets`, `setup`, `bootstrap`,
-and `ladder`; unknown keys at any level are rejected. Every supported key appears in
+The root accepts exactly `chain`, `identity`, `contracts`, `apis`, `markets`, `setup`,
+`redeemWithdrawable`, `bootstrap`, and `ladder`; unknown keys at any level are rejected. Every supported key appears in
 [`quoter-bot.example.yaml`](./quoter-bot.example.yaml).
 
 - `chain`: `id`, `rpcUrl`, `archiveRpcUrl`.
@@ -923,7 +939,7 @@ required.
 | `higherRateBudgetAssets`     | Maximum raw assets allocated across higher-rate rungs. This side posts lend-side buys and is additionally capped by available balance, allowance, and exposure.                                                      | Positive and at least `minimumOfferAssets`.                                                                                                                                    |
 | `targetMarketExposureAssets` | Raw cap for credit plus reserved lend-buy liquidity in this market. It caps only the higher-rate, exposure-increasing side.                                                                                          | Positive and no greater than `maximumTotalExposureAssets`.                                                                                                                     |
 | `maximumTotalExposureAssets` | Raw cap for credit plus reserved lend-buy liquidity across all configured markets. It caps only the higher-rate, exposure-increasing side.                                                                           | Positive.                                                                                                                                                                      |
-| `minimumOfferAssets`         | Smallest raw size permitted for any emitted rung. Capacity funds the closest rungs first and omits a side or outer rungs that cannot each meet this floor.                                                           | Positive and no greater than either non-zero side budget. Use at least `101000000` for USDC.                                                                                   |
+| `minimumOfferAssets`         | Smallest raw size permitted for any emitted rung. Capacity funds the closest rungs first and omits a side or outer rungs that cannot each meet this floor.                                                           | Positive and no greater than either non-zero side budget. At least the Router's minimum offer size on the chain: 10.00148 USDC on Base, so `11000000` clears it.               |
 | `groupMode`                  | Consumption-cap grouping: `shared-rung` creates one independent group per rung; `per-book` creates one shared group for all funded rungs on each side.                                                               | Exactly `shared-rung` or `per-book`.                                                                                                                                           |
 | `loopIntervalSeconds`        | Requested delay between completed monitor cycles for this market set; the monitor uses the shortest configured value.                                                                                                | Positive integer no greater than `2147483`, keeping the millisecond delay within the runtime timer limit.                                                                      |
 | `bookCrossedCooldownSeconds` | Seconds one side of the resting ladder waits between replacements triggered by a third party crossing it. Anchored to the block timestamp the replaced publication was prepared at, and held in process memory only. | Optional positive integer no greater than `2147483`; defaults to three times `loopIntervalSeconds`.                                                                            |
@@ -1528,12 +1544,12 @@ collections are rejected atomically. The four outputs are Bootstrap JSON, the co
 `BOOTSTRAP_MARKETS` value, Ladder JSON, and the compact exact `LADDER_MARKETS` value; each collection
 validates independently.
 
-From the repository root, one command runs `pnpm install --frozen-lockfile` (also on already-installed
+From the repository root, one command runs `bun install --frozen-lockfile` (also on already-installed
 workspaces, where it is fast), creates a fresh isolated build, and serves it on loopback. It does not
 run test assertions or require Chromium:
 
 ```sh
-pnpm run quoter-bot:playground
+bun run quoter-bot:playground
 ```
 
 Open the exact URL printed by the command (default `http://127.0.0.1:4173`). Override the listener

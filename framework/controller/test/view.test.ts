@@ -4,9 +4,10 @@ import { createKernel } from '@repo/kernel'
 import { describe, expect, it } from 'vitest'
 
 import { isBusy } from '../src'
-import { viewOf } from '../src/view'
+import { healthOf, viewOf } from '../src/view'
+import { configFor } from './fixtures'
 
-const config = { validators: [], caps: {}, maxEvidenceAgeBlocks: 0 } as unknown as KernelConfig
+const config: KernelConfig = { ...configFor(undefined as never, {}), validators: [] }
 
 const entry = (id: string, intentId: string, state: Entry['state'], adopted = false): Entry => ({
   spec: {
@@ -158,6 +159,44 @@ describe('the kernel view', () => {
     expect(viewOf(running({}))).toMatchObject({ oldestPendingMs: 0, pendingAtCeiling: 0 })
   })
 
+  it('gives a kernel health of instants and statuses, never an age or a reason', () => {
+    const state = running({
+      now: 9_000,
+      chainNonce: 4,
+      nextNonce: 6,
+      nonces: {
+        4: { ...record(4, sent('n#run.1')), openedAt: 1_000 },
+        5: { ...record(5, sent('m#run.2')), openedAt: 3_000 },
+        3: record(3, sent('k#run.3'), true)
+      },
+      plans: { 'p#run.4': plan('p#run.4') }
+    })
+    expect(healthOf(state, 8453)).toStrictEqual({
+      chainId: 8453,
+      lifecycle: 'running',
+      acceptingNewWork: true,
+      numReservations: 3,
+      unresolvedNonces: 2,
+      oldestPendingSince: 1_000,
+      pendingAtCeiling: 0,
+      chainNonce: 4,
+      nextNonce: 6
+    })
+    expect(healthOf({ ...state, now: 60_000 }, 8453)).toStrictEqual(healthOf(state, 8453))
+    const stopped = running({
+      lifecycle: { kind: 'stopped', outcome: 'unsafe', reason: 'executor failed: 0xdeadbeef' }
+    })
+    expect(healthOf(stopped, 1)).toStrictEqual({
+      chainId: 1,
+      lifecycle: 'stopped',
+      stopOutcome: 'unsafe',
+      acceptingNewWork: false,
+      numReservations: 0,
+      unresolvedNonces: 0,
+      pendingAtCeiling: 0
+    })
+  })
+
   it('accepts new work only while running and not latched on an unresolved send', () => {
     expect(
       viewOf(running({ nonces: { 0: record(0, sent('m#run.1', 'unknown')) } })).acceptingNewWork
@@ -166,8 +205,6 @@ describe('the kernel view', () => {
       viewOf(running({ nonces: { 0: record(0, sent('m#run.1', 'unknown'), true) } }))
         .acceptingNewWork
     ).toBe(true)
-    expect(
-      viewOf(running({ lifecycle: { kind: 'idle' } as KernelState['lifecycle'] })).acceptingNewWork
-    ).toBe(false)
+    expect(viewOf(running({ lifecycle: { kind: 'idle' } })).acceptingNewWork).toBe(false)
   })
 })

@@ -11,8 +11,8 @@ section below is that validator's whole claim.
 - [`test/`](./test) holds the conformance tests. `test/readings/*.json` pins every recorded case's
   reading under the validator's `id@version`. Re-record a case only with a version bump
   (`RECORD_READINGS=1` adds a version or case and never rewrites one).
-- Run them with `pnpm --filter @repo/validators run test` and
-  `pnpm --filter @repo/validators run typecheck`.
+- Run them with `bun run --cwd framework/validators test` and
+  `bun run --cwd framework/validators typecheck`.
 
 ## 1. What every validator here guarantees
 
@@ -192,6 +192,42 @@ promises no commitment").
 value on the call, another resolver function, and calldata that is not hex, is cut short or
 carries trailing bytes ("refuses %s").
 
+## 5. Midnight redemption
+
+`midnightOffersValidator`, id `midnight-offers`, version 3, is specified in
+[kernel SPEC §9.2](../kernel/SPEC.md#92-midnight-offers), except for this one rule, which version 3
+added. Version 3 reads every case recorded under version 2 the same way, so it accepts ledgers
+recorded under version 2 ("accepts ledgers recorded under version 2"). Assumes Midnight `withdraw(Market market, uint256 units, address onBehalf, address receiver)`
+as encoded by `@repo/contracts` and `@morpho-org/midnight-sdk`. It takes `units` from the
+position's `credit` and from the market's `withdrawable` and `totalUnits`, and transfers `units` of
+the loan token to `receiver` (review). It is the quoter's only call that moves principal. The signer
+is a Midnight delegate of the maker, so it may already withdraw for the maker onchain and name any
+receiver: this rule and the signer policy are all that stop it.
+
+**Allows**, reading it as creating, exposing, carrying, retiring and consuming nothing, a
+zero-value transaction to this chain's Midnight whose calldata is exactly one `withdraw`, re-encoding
+byte for byte, with no witness, where:
+
+- `onBehalf` and `receiver` are both the configured maker, so the credit is paid only to its owner
+  ("refuses %s": a withdrawal on behalf of another maker, to another receiver);
+- the market is on this chain and this Midnight, names its collaterals in strictly ascending token
+  order as Midnight requires, and its id is allowlisted. The SDK sorts collaterals before hashing, so
+  without the order check a reordered market would hash to an allowlisted id that is not its own
+  ("refuses %s": a market on another chain, on another Midnight, not allowlisted; "refuses a
+  withdrawal naming its collaterals out of order");
+- `units` is positive ("refuses %s": a withdrawal of zero units).
+
+`units` has no upper bound here: Midnight reverts any amount above the maker's credit or the market's
+`withdrawable`, and the kernel's simulation stops it before signing (review). `confirm` accepts any
+successful receipt, since nothing is committed ("reads a withdrawal of the maker's credit to the
+maker as committing nothing, and confirms it").
+
+**Refuses** a `withdraw` inside a `multicall`, with value, with trailing calldata, with a witness, or
+to any target but this chain's Midnight ("refuses %s"). The quoter's signer policy pins the
+`withdraw` selector on Midnight with its own constant gas ceiling, `MAX_REDEMPTION_GAS` in
+`bots/quoter-bot/src/kernel.ts`, about twice the most a `withdraw` was measured to cost on a Base fork
+(review).
+
 ## What is deliberately left out
 
 - **Roles and timelocks.** Neither validator checks that the account holds the allocator role, or
@@ -212,4 +248,5 @@ carries trailing bytes ("refuses %s").
   that returns `false` instead of reverting would leave its sweep in the Executor, where anyone can
   call it (review).
 - **Midnight offers.** `midnightOffersValidator` is specified in
-  [kernel SPEC §9.2](../kernel/SPEC.md#92-midnight-offers), not here.
+  [kernel SPEC §9.2](../kernel/SPEC.md#92-midnight-offers), not here, except for its redemption rule
+  (§5).

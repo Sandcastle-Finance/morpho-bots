@@ -1,67 +1,65 @@
-import type { BackoffPolicy, Backoff, Bot, KernelView } from '@repo/controller'
-import type { Budget, GraphBuilder, Keyed, KeyedWrite, Node, Stream } from '@repo/engine'
+import type { Backoff, Bot, KernelView } from '@repo/controller'
+import type { GraphBuilder, Keyed, KeyedWrite, Node, Stream } from '@repo/engine'
 import type { KernelHead, KernelHostOptions } from '@repo/kernel'
 import type { Logger } from '@repo/kit'
 import type { PairCurve } from '@repo/swaps'
 
 import { defineBot, isBackedOff, isBusy, logBackoff, logTasks, tasks } from '@repo/controller'
-import { emitTo, every, GraphDefinitionError, keyedLevel, lane, latest, watch } from '@repo/engine'
+import { emitTo, every, keyedLevel, lane, latest, watch } from '@repo/engine'
 import { tryCatch } from '@repo/utils'
 
 import type { WhitelistSource } from './discovery/markets'
 import type { PricedToken, PriceTable } from './discovery/token-prices'
-import type { PositionReading, Pricing, RouteLevel, Sizing, SizingOptions } from './liquidation'
+import type { FeeReads } from './kernel'
+import type { PositionReading, Pricing, RouteLevel, Sizing } from './liquidation'
 import type { PrepareDeps } from './prepare'
 import type { RouteRequest, RouteResolution, RouteSources } from './routes'
 import type { PlanSkipLog } from './runner/plan-skip-log'
+import type { LiquidatorSettings } from './settings'
 import type { WorldDeps } from './sources'
 import type { TickStats } from './stats'
 
 import { listedAt } from './discovery/markets'
+import { encodeLiquidationExec } from './execution/encode-call'
+import { liquidationFees, liquidatorKernelConfig, PREPARE_TIMEOUT_MS } from './kernel'
 import { liquidationTask, positionBid, pricingOf, sizePosition, taskOf } from './liquidation'
 import { preparePosition } from './prepare'
 import { createReporter } from './report'
 import { revertReason } from './revert.utils'
 import { createCurveSource, createRouteResolver, routesDue, routeWriteOf, wantedBy } from './routes'
+import { parseLiquidatorSettings } from './settings'
 import { readWorld } from './sources'
 
 /** World reads queued behind the one in flight; a read for a head the kernel has passed is skipped. */
 const WORLD_QUEUE = 256
 /** Preparations waiting for the venue lane; the family never has more out than it runs. */
 const PREPARE_QUEUE = 64
-/** A firm quote with its retries and a simulation, well inside the world's validity. */
-export const PREPARE_TIMEOUT_MS = 20_000
 /** How often, at most, the whitelist's age is judged and its and the prices' refreshes considered. */
 const SOURCES_CLOCK_MS = 5_000
 
-export type LiquidatorOptions = Readonly<{
-  kernel: Omit<KernelHostOptions, 'requests' | 'facts' | 'onActivity'>
-  world: Omit<WorldDeps, 'logger'>
-  /** How long a world read authorizes liquidations, from when it started. */
-  worldValidMs: number
-  prepare: Omit<PrepareDeps, 'sizing' | 'stats' | 'logger'>
-  sizing: SizingOptions
-  /** The market whitelist, as {@link Start} carries it and how to refresh it. */
-  markets: Readonly<{
-    maxAgeMs: number
-    refreshMs: number
-    refresh: () => Promise<readonly WhitelistSource[]>
-  }>
-  /** Token USD prices, which order positions and bound their fees, each used for `validForMs` after its fetch. */
-  prices: Readonly<{ refreshMs: number; validForMs: number; refresh: () => Promise<PriceSnapshot> }>
+export const LIQUIDATOR_GRAPH = 'midnight-liquidation'
+
+/** What the liquidator reaches outside its graph; a replay runs none of it. */
+export type LiquidatorDeps = Readonly<{
+  /** The kernel's chain, ledger and effects; its config and enrollment come from the settings. */
+  kernel: Omit<KernelHostOptions, 'config' | 'enrollment' | 'requests' | 'facts' | 'onActivity'>
+  world: Omit<WorldDeps, 'caller' | 'logger'>
+  /** Refreshes the market whitelist's sources. */
+  refreshMarkets: () => Promise<readonly WhitelistSource[]>
+  refreshPrices: () => Promise<PriceSnapshot>
   /** Where the route and curve levels the bids price against come from. */
-  routes: RouteSources
-  /** How many preparations run at once, and how many may start in a window. */
-  venue: Readonly<{ concurrency: number; budget?: Budget }>
-  backoff: BackoffPolicy
-  /** Names this run in its intent ids, so a restart's acts never collide with an earlier run's. */
-  runId: string
-  /** How many native reservations the kernel's caps allow. */
-  maxReservations: number
+  routes: Omit<RouteSources, 'venues'>
+  quoteFor: PrepareDeps['quoteFor']
+  simulate: PrepareDeps['simulate']
+  readFees: FeeReads
+  /** The clock preparations price and stamp their sends at. */
+  now: () => number
   stats: TickStats
   planSkipLog: PlanSkipLog
   logger: Logger
 }>
+
+type Declared = Readonly<{ settings: LiquidatorSettings; deps: LiquidatorDeps }>
 
 export type Markets = Readonly<{ sources: readonly WhitelistSource[]; now: number }>
 
@@ -163,12 +161,10 @@ const declareRefresh = <T>(
 }
 
 /** The whitelist and token prices, each refreshed on a clock, that the world read and pricing read beside. */
-const declareSources = (g: GraphBuilder, options: LiquidatorOptions) => {
-  const { logger } = options
-  if (!Number.isSafeInteger(options.prices.validForMs) || options.prices.validForMs <= 0)
-    throw new GraphDefinitionError('prices need a positive safe integer validForMs')
+const declareSources = (g: GraphBuilder, { settings, deps }: Declared) => {
+  const { logger } = deps
   const clock = g.clock('sources.clock', {
-    everyMs: Math.min(SOURCES_CLOCK_MS, options.markets.refreshMs, options.prices.refreshMs),
+    everyMs: Math.min(SOURCES_CLOCK_MS, settings.markets.refreshMs, settings.prices.refreshMs),
     value: now => now
   })
   const start = g.occurrences<Start>('sources.start')
@@ -178,16 +174,17 @@ const declareSources = (g: GraphBuilder, options: LiquidatorOptions) => {
     clock,
     start,
     {
-      everyMs: options.markets.refreshMs,
+      everyMs: settings.markets.refreshMs,
       readAt: ({ at }) => at,
-      refresh: options.markets.refresh,
+      refresh: deps.refreshMarkets,
       failed: null,
       logger
     }
   )
+  const noMarkets: Markets = { sources: [], now: 0 }
   const markets = g.fold('markets', {
     reads: { sources: every(marketReads), clock: every(clock), start: every(start) },
-    initial: { sources: [], now: 0 } as Markets,
+    initial: noMarkets,
     applyInput: (state, input) => ({
       state:
         input.from === 'start'
@@ -200,9 +197,9 @@ const declareSources = (g: GraphBuilder, options: LiquidatorOptions) => {
     })
   })
   const priceReads = declareRefresh<KeyedWrite<PricedToken>>(g, 'prices', clock, start, {
-    everyMs: options.prices.refreshMs,
+    everyMs: settings.prices.refreshMs,
     readAt: () => null,
-    refresh: async () => priceWriteOf(await options.prices.refresh(), options.prices.validForMs),
+    refresh: async () => priceWriteOf(await deps.refreshPrices(), settings.prices.validForMs),
     failed: { coverage: 'failed', reason: 'prices' },
     logger
   })
@@ -219,15 +216,15 @@ const declareSources = (g: GraphBuilder, options: LiquidatorOptions) => {
 
 /** The world read at its head, as the whitelist stands when the read runs. */
 const readListedWorld =
-  (options: LiquidatorOptions) =>
+  ({ settings, deps }: Declared) =>
   async (
     head: KernelHead,
     now: () => number,
     samples: Readonly<{ markets: () => Markets }>
   ): Promise<KeyedWrite<PositionReading>> => {
-    const { logger, stats } = options
+    const { logger, stats } = deps
     const { sources } = samples.markets()
-    const { maxAgeMs } = options.markets
+    const { maxAgeMs } = settings.markets
     const at = now()
     const whitelist = {
       ...listedAt(sources, at, maxAgeMs),
@@ -239,7 +236,9 @@ const readListedWorld =
         expired: updatedAt === null || at - updatedAt > maxAgeMs
       }))
     }
-    const read = await tryCatch(readWorld(head, whitelist, { ...options.world, logger }))
+    const read = await tryCatch(
+      readWorld(head, whitelist, { ...deps.world, caller: settings.executor, logger })
+    )
     if (read.error) {
       logger.warn('tick.error', { reason: revertReason(read.error) })
       return { coverage: 'failed', reason: 'world' }
@@ -252,21 +251,22 @@ const readListedWorld =
  * The world read at each new kernel head, the whitelist and prices it reads beside, and the
  * position-keyed levels and maps ranking and preparation price against.
  */
-const declareWorld = (b: Bot, options: LiquidatorOptions) => {
-  const { start, markets, prices, now } = b.raw(g => declareSources(g, options))
+const declareWorld = (b: Bot, declared: Declared) => {
+  const { settings, deps } = declared
+  const { start, markets, prices, now } = b.raw(g => declareSources(g, declared))
   const world = b.source('world', {
     level: 'positions',
     at: 'head',
     queue: WORLD_QUEUE,
-    validForMs: options.worldValidMs,
+    validForMs: settings.worldValidMs,
     samples: { markets },
-    logger: options.logger,
-    read: readListedWorld(options)
+    logger: deps.logger,
+    read: readListedWorld(declared)
   })
   const positions = world.level
-  const liquidatable = declareListedFacts(b, positions, markets, options.markets.maxAgeMs)
+  const liquidatable = declareListedFacts(b, positions, markets, settings.markets.maxAgeMs)
   const sizing = b.derive('positions.sizing', positions, reading =>
-    sizePosition(reading, options.sizing)
+    sizePosition(reading, settings.sizing)
   )
   const { routeWrites, routes, curveWrites, curves, pricing } = b.raw(g => {
     const routeWrites = g.node<KeyedWrite<RouteLevel>>('routes.reads')
@@ -279,7 +279,7 @@ const declareWorld = (b: Bot, options: LiquidatorOptions) => {
         prices: levels.prices.keys,
         routes: levels.routes.keys,
         curves: levels.curves.keys,
-        venues: options.routes.venues
+        venues: settings.venues
       })
     })
     return { routeWrites, routes, curveWrites, curves, pricing }
@@ -298,7 +298,7 @@ const declareWorld = (b: Bot, options: LiquidatorOptions) => {
     positions,
     (reading, _key, { pricing: current }) => ({
       reading,
-      pricing: pricingOf(reading.out, current, options.prepare.nativeToken)
+      pricing: pricingOf(reading.out, current, settings.nativeToken)
     }),
     { with: { pricing: latest(pricing) } }
   )
@@ -341,9 +341,10 @@ const declareRouteSources = (
   world: World,
   view: Node<KernelView>,
   backoff: Node<Backoff>,
-  options: LiquidatorOptions
+  { settings, deps }: Declared
 ) => {
-  const { logger } = options
+  const { logger } = deps
+  const routeSources = { ...deps.routes, venues: settings.venues }
   const { sizing, liquidatable, routes, curves, routeWrites } = world
   const listedIdle =
     ({ liquidatable: held, view: kernel, backoff }: Partial<Readonly<ResolvingInputs>>) =>
@@ -353,6 +354,8 @@ const declareRouteSources = (
       !isBackedOff(backoff, position, 'liquidate')
   const requests = g.node<RouteRequest>('routes.requests')
   const resolutions = g.node<RouteResolution>('routes.resolutions')
+  const noInputs: Partial<Readonly<ResolvingInputs>> = {}
+  const noOutstanding: Readonly<Record<string, Readonly<{ id: number; at: number }>>> = {}
   g.fold('routes.resolving', {
     reads: {
       world: every(world.worldWrites),
@@ -365,8 +368,8 @@ const declareRouteSources = (
     },
     emits: [requests, routeWrites],
     initial: {
-      inputs: {} as Partial<Readonly<ResolvingInputs>>,
-      outstanding: {} as Readonly<Record<string, Readonly<{ id: number; at: number }>>>,
+      inputs: noInputs,
+      outstanding: noOutstanding,
       issued: 0,
       read: false
     },
@@ -405,7 +408,7 @@ const declareRouteSources = (
       }
     }
   })
-  const resolveRoute = createRouteResolver(options.routes)
+  const resolveRoute = createRouteResolver(routeSources)
   g.effect('routes.resolve', {
     requests: { request: every(requests) },
     results: resolutions,
@@ -414,7 +417,7 @@ const declareRouteSources = (
       if (resolution) context.write(resolution)
     }
   })
-  const sweepCurves = createCurveSource(options.routes, logger)
+  const sweepCurves = createCurveSource(routeSources, logger)
   g.effect('curves.sweep', {
     requests: { world: every(world.worldWrites), routes: every(world.routeWrites) },
     samples: { sizing, liquidatable, routes, curves, view, backoff },
@@ -451,81 +454,117 @@ const declareRouteSources = (
  * back it off. Shared liquidity between positions is neither reserved nor a conflict: simulation and the
  * Executor's onchain bounds stop a squeezed route, at the cost of gas.
  */
-export const declareLiquidator = defineBot(
-  'midnight-liquidation',
-  (b, options: LiquidatorOptions) => {
-    const { logger, stats } = options
-    const reporter = createReporter({
-      stats,
-      planSkipLog: options.planSkipLog,
-      headroomFloorBps: options.sizing.headroomFloorBps,
-      logger
-    })
-    const kernel = b.kernel({ ...options.kernel, onActivity: reporter.reportActivity })
-    const world = declareWorld(b, options)
-    const { positions, sizing, liquidatable } = world
-    const candidates = world.bids
-    const deps = { ...options.prepare, sizing: options.sizing, stats, logger }
-    const liquidations = tasks.each(b, 'liquidations', {
-      kernel,
-      candidates,
-      facts: liquidatable,
-      inputs: world.priced,
-      runId: options.runId,
-      maxReservations: options.maxReservations,
-      backoff: options.backoff,
-      policy: liquidationTask,
-      prepare: {
-        lane: lane('venue', { ...options.venue, queue: PREPARE_QUEUE }),
-        timeoutMs: PREPARE_TIMEOUT_MS,
-        handle: async request => {
-          const { reading, pricing } = request.input
-          const answer = await tryCatch(
-            preparePosition({ ...request, input: reading }, pricing, deps)
-          )
-          if (!answer.error) return answer.data
-          logger.warn('prepare.error', {
-            id: request.key,
-            reason: revertReason(answer.error)
-          })
-          return { ok: false, reason: 'error', backoff: true }
-        }
-      }
-    })
-    const { backoff } = liquidations
-    b.raw(g => declareRouteSources(g, world, kernel.view, backoff.state, options))
-    b.sink('liquidations.log', {
-      finishOnStop: true,
-      on: { world: world.worldWrites, acts: liquidations.events, backoff: backoff.events },
-      samples: { positions, sizing, liquidatable, view: kernel.view, backoff: backoff.state },
-      handle: ({ from, value }, samples) => {
-        if (from === 'world')
-          return reporter.reportWorld({
-            positions: samples.positions(),
-            sizing: samples.sizing(),
-            liquidatable: samples.liquidatable(),
-            view: samples.view(),
-            backoff: samples.backoff(),
-            complete: value.coverage === 'complete'
-          })
-        if (from === 'acts') return logTasks(logger, value)
-        logBackoff(logger, value)
-      }
-    })
-    return {
-      kernel,
-      start: world.start,
-      markets: world.markets,
-      prices: world.prices,
-      positions,
-      liquidatable,
-      routes: world.routes,
-      curves: world.curves,
-      pricing: world.pricing,
-      candidates,
-      sizing,
-      backoff,
-      liquidations
-    }
+const declare = defineBot(LIQUIDATOR_GRAPH, (b, declared: Declared) => {
+  const { settings, deps } = declared
+  const { logger, stats } = deps
+  const reporter = createReporter({
+    stats,
+    planSkipLog: deps.planSkipLog,
+    headroomFloorBps: settings.sizing.headroomFloorBps,
+    logger
+  })
+  const kernel = b.kernel({
+    ...deps.kernel,
+    config: liquidatorKernelConfig(settings),
+    enrollment: settings.kernel.enrollment,
+    onActivity: reporter.reportActivity
+  })
+  const world = declareWorld(b, declared)
+  const { positions, sizing, liquidatable } = world
+  const candidates = world.bids
+  const prepareDeps: PrepareDeps = {
+    executor: settings.executor,
+    sizing: settings.sizing,
+    minSurplusBps: settings.minSurplusBps,
+    quoteFor: deps.quoteFor,
+    encode: (market, borrower, plan, swap) =>
+      encodeLiquidationExec({
+        executor: settings.executor,
+        midnight: settings.midnight,
+        market,
+        collateralIndex: plan.collateralIndex,
+        seizedAssets: plan.seizedAssets,
+        repaidUnits: plan.repaidUnits,
+        borrower,
+        postMaturityMode: plan.postMaturityMode,
+        plan: swap,
+        recipient: settings.account
+      }),
+    simulate: deps.simulate,
+    feesFor: liquidationFees(settings, deps.readFees),
+    nativeToken: settings.nativeToken,
+    validForMs: settings.sendLifeMs,
+    now: deps.now,
+    stats,
+    logger
   }
-)
+  const liquidations = tasks.each(b, 'liquidations', {
+    kernel,
+    candidates,
+    facts: liquidatable,
+    inputs: world.priced,
+    runId: settings.runId,
+    maxReservations: settings.maxReservations,
+    backoff: settings.backoff,
+    policy: liquidationTask,
+    prepare: {
+      lane: lane('venue', { ...settings.venue, queue: PREPARE_QUEUE }),
+      timeoutMs: PREPARE_TIMEOUT_MS,
+      handle: async request => {
+        const { reading, pricing } = request.input
+        const answer = await tryCatch(
+          preparePosition({ ...request, input: reading }, pricing, prepareDeps)
+        )
+        if (!answer.error) return answer.data
+        logger.warn('prepare.error', {
+          id: request.key,
+          reason: revertReason(answer.error)
+        })
+        return { ok: false, reason: 'error', backoff: true }
+      }
+    }
+  })
+  const { backoff } = liquidations
+  b.raw(g => declareRouteSources(g, world, kernel.view, backoff.state, declared))
+  b.sink('liquidations.log', {
+    finishOnStop: true,
+    on: { world: world.worldWrites, acts: liquidations.events, backoff: backoff.events },
+    samples: { positions, sizing, liquidatable, view: kernel.view, backoff: backoff.state },
+    handle: ({ from, value }, samples) => {
+      if (from === 'world')
+        return reporter.reportWorld({
+          positions: samples.positions(),
+          sizing: samples.sizing(),
+          liquidatable: samples.liquidatable(),
+          view: samples.view(),
+          backoff: samples.backoff(),
+          complete: value.coverage === 'complete'
+        })
+      if (from === 'acts') return logTasks(logger, value)
+      logBackoff(logger, value)
+    }
+  })
+  return {
+    kernel,
+    start: world.start,
+    markets: world.markets,
+    prices: world.prices,
+    positions,
+    liquidatable,
+    routes: world.routes,
+    curves: world.curves,
+    pricing: world.pricing,
+    candidates,
+    sizing,
+    backoff,
+    liquidations
+  }
+})
+
+/**
+ * Builds the liquidator from its settings, validated here, so a live run and a replay of its
+ * journal build the same graph.
+ * @throws InvalidSettingsError, or GraphDefinitionError for a graph the engine refuses.
+ */
+export const declareLiquidator = (settings: LiquidatorSettings, deps: LiquidatorDeps) =>
+  declare({ settings: parseLiquidatorSettings(settings), deps })

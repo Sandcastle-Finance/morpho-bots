@@ -42,9 +42,11 @@ const inclusions = (before: KernelState, plans: readonly Plan[]) =>
     const known = before.plans[plan.intentId]?.included ?? []
     return (plan.included ?? [])
       .filter(({ step, hash }) => !known.some(k => k.step === step && k.hash === hash))
-      .map(
-        (inclusion): KernelActivity => ({ type: 'included', intentId: plan.intentId, ...inclusion })
-      )
+      .map((inclusion): KernelActivity => ({
+        type: 'included',
+        intentId: plan.intentId,
+        ...inclusion
+      }))
   })
 
 const resolutions = (before: KernelState, records: readonly NonceRecord[]) =>
@@ -96,17 +98,15 @@ export const activityOf = (
     ...releases(before, after, event),
     ...inclusions(before, [...Object.values(after.plans), ...pruned.plans]),
     ...(restored ? [] : resolutions(before, records)),
-    ...pruned.nonces.map(
-      (record): KernelActivity => ({
-        type: 'final',
-        nonce: record.nonce,
-        hashes: record.candidates.map(c => c.hash)
-      })
-    ),
+    ...pruned.nonces.map((record): KernelActivity => ({
+      type: 'final',
+      nonce: record.nonce,
+      hashes: record.candidates.map(c => c.hash)
+    })),
     ...(restored ? [] : entries(before, after)),
     ...commands
       .filter(command => command.type === 'notify')
-      .map(({ type: _, ...notice }): KernelActivity => ({ type: 'notice', ...notice })),
+      .map(({ type: _type, ...notice }): KernelActivity => ({ type: 'notice', ...notice })),
     ...alarms.map((reason): KernelActivity => ({ type: 'alarm', reason })),
     ...(before.lifecycle.kind === 'starting' && after.lifecycle.kind === 'running'
       ? [{ type: 'running' } as const]

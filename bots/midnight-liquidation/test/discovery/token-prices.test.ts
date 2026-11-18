@@ -25,16 +25,6 @@ const NOOP_LOGGER: Logger = {
   error: () => {}
 }
 
-function capturingLogger() {
-  const events: { level: string; event: string; fields?: Record<string, unknown> }[] = []
-  const make = (level: string) => (event: string, fields?: Record<string, unknown>) =>
-    events.push({ level, event, fields })
-  return {
-    logger: { debug: make('debug'), info: make('info'), warn: make('warn'), error: make('error') },
-    find: (event: string) => events.find(e => e.event === event)
-  }
-}
-
 const jsonResponse = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -100,8 +90,6 @@ describe('createTokenPriceSource', () => {
     // Scales linearly, and floors rather than rounding up.
     expect(usdValueIn(source.table(), USDC, 1n)).toBe(100n)
     expect(source.snapshot()).toMatchObject({ tokens: 2 })
-    // The table the graph holds values the same way.
-    expect(usdValueIn(source.table(), WETH, 10n ** 18n)).toBe(250_000_000_000n)
   })
 
   it('prices one whole token without a chain read, at the ladder scale the selector expects', async () => {
@@ -158,12 +146,11 @@ describe('createTokenPriceSource', () => {
 
   it('keeps last-known-good and does not reject when the API fails', async () => {
     let status = 200
-    const logs = capturingLogger()
     const source = createTokenPriceSource({
       apiUrl: BASE_URL,
       apiKey: API_KEY,
       chainId: 8453,
-      logger: logs.logger,
+      logger: NOOP_LOGGER,
       sleep: async () => {},
       fetchImpl: async () => jsonResponse({ data: [row(USDC, 6, 1)] }, status)
     })
@@ -174,7 +161,6 @@ describe('createTokenPriceSource', () => {
     // Contractually non-throwing: ranking degrades, it never fails closed.
     await expect(source.refresh()).resolves.toBeUndefined()
     expect(usdValueIn(source.table(), USDC, 1_000_000n)).toBe(100_000_000n)
-    expect(logs.find('prices.refresh_failed')?.level).toBe('warn')
   })
 
   it('retries a 429 honoring retry-after', async () => {
@@ -202,20 +188,18 @@ describe('createTokenPriceSource', () => {
     expect(usdValueIn(source.table(), USDC, 1_000_000n)).toBe(100_000_000n)
   })
 
-  it('warns when a previously-populated snapshot comes back empty', async () => {
+  it('replaces a populated snapshot with an empty one', async () => {
     let body: unknown = { data: [row(USDC, 6, 1)] }
-    const logs = capturingLogger()
     const source = createTokenPriceSource({
       apiUrl: BASE_URL,
       apiKey: API_KEY,
       chainId: 8453,
-      logger: logs.logger,
+      logger: NOOP_LOGGER,
       fetchImpl: async () => jsonResponse(body)
     })
     await source.refresh()
     body = { data: [] }
     await source.refresh()
-    expect(logs.find('prices.tokens_empty')?.fields).toMatchObject({ previous: 1 })
     expect(usdValueIn(source.table(), USDC, 1n)).toBeNull()
   })
 

@@ -5,6 +5,7 @@ import type { Decision, LiveView, Observed, Prepared } from './decision'
 import type { LadderCrossings, LadderPrepareAnswer } from './ladder-decision'
 import type { MarketReport } from './market-report'
 import type { MarketReading, ReferenceReading } from './readings'
+import type { Redemption } from './redemption'
 import type { WorldAccounting, WorldReading } from './world'
 
 import { BootstrapAdapterError, LadderAdapterError } from '../../errors'
@@ -13,6 +14,7 @@ import { bootstrapReading } from './bootstrap-state'
 import { exposureSnapshot } from './exposure'
 import { decideLadder, ladderPrepareRequest } from './ladder-decision'
 import { ladderReading } from './ladder-state'
+import { redeeming } from './redemption'
 import { derive } from './world'
 
 /** The answer a market's preparation returns, for either strategy. */
@@ -25,6 +27,8 @@ type MarketContext = Readonly<{
   crossings: LadderCrossings
   /** Whether an earlier poll of this run saw the bootstrap market reach its initial target. */
   completed: boolean
+  /** The redemption this read allows, while redeeming withdrawable credit is on. */
+  redemption?: Redemption
 }>
 
 /**
@@ -90,14 +94,16 @@ const withMaturity = (
  * What the market's preparation would be asked for now, or nothing while it would not act.
  * @param reading - The market's reading from this poll.
  * @param config - The market's validated config.
- * @param context - The reference, live view, crossings, and completion this run observed.
- * @returns The strategy-tagged request, or `undefined` when the market would not act.
+ * @param context - The reference, live view, crossings, completion, and redemption this run observed.
+ * @returns The strategy-tagged request, or `undefined` when the market would not act or redeems
+ * first, since a replacement is sized from the credit the redemption changes.
  */
 export const prepareRequest = (
   reading: MarketReading,
   config: ValidLadderConfig | ValidBootstrapConfig,
   context: MarketContext
 ) => {
+  if (context.redemption) return undefined
   const reference = withMaturity(context.reference, reading, config)
   const request =
     reading.strategy === 'ladder'
@@ -113,10 +119,11 @@ export const prepareRequest = (
 }
 
 /**
- * A market's decision from its reading, its context, and its preparation's answer.
+ * A market's decision from its reading, its context, and its preparation's answer, with the
+ * redemption the context carries ordered before the strategy's own act (see `redeeming`).
  * @param reading - The market's reading from this poll.
  * @param config - The market's validated config.
- * @param context - The reference, live view, crossings, and completion this run observed.
+ * @param context - The reference, live view, crossings, completion, and redemption this run observed.
  * @param prepare - The preparation's answer for this market.
  * @returns The decision with its act, if any, and the market report detail.
  */
@@ -127,20 +134,22 @@ export const decideMarket = (
   prepare: Prepared<PrepareAnswer>
 ): Decision & Readonly<{ detail: MarketReport }> => {
   const reference = withMaturity(context.reference, reading, config)
-  return reading.strategy === 'ladder'
-    ? decideLadder({
-        config: config as ValidLadderConfig,
-        reading,
-        reference,
-        view: context.view,
-        crossings: context.crossings,
-        prepare: prepare as Prepared<LadderPrepareAnswer>
-      })
-    : decideBootstrap({
-        config: config as ValidBootstrapConfig,
-        reading,
-        reference,
-        view: context.view,
-        prepare: prepare as Prepared<BootstrapPrepareAnswer>
-      })
+  const decision =
+    reading.strategy === 'ladder'
+      ? decideLadder({
+          config: config as ValidLadderConfig,
+          reading,
+          reference,
+          view: context.view,
+          crossings: context.crossings,
+          prepare: prepare as Prepared<LadderPrepareAnswer>
+        })
+      : decideBootstrap({
+          config: config as ValidBootstrapConfig,
+          reading,
+          reference,
+          view: context.view,
+          prepare: prepare as Prepared<BootstrapPrepareAnswer>
+        })
+  return context.redemption ? redeeming(decision, context.redemption) : decision
 }

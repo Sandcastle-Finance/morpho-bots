@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_GAS_LIMIT, InvalidKernelSettingError } from '@repo/kit'
 import { getAddress, parseGwei } from 'viem'
 import { describe, expect, it } from 'vitest'
 
@@ -16,7 +17,10 @@ const BASE_ENV = {
   VAULT_WHITELIST: `${VAULT_A}, ${VAULT_B.toLowerCase()}`,
   KERNEL_STATE_DIR: '/data/kernel',
   KERNEL_ENROLLMENT: 'enrolling',
-  MAX_FEE_GWEI: '250'
+  MAX_FEE_GWEI: '250',
+  JOURNAL_RUN_CAP_BYTES: '1073741824',
+  BUILD_REVISION: '0d58dd8e5',
+  BUILD_IMAGE_TAG: 'test'
 }
 
 describe('loadConfig', () => {
@@ -31,14 +35,14 @@ describe('loadConfig', () => {
     expect(config.minUtilizationDeltaBips).toBe(250)
     expect(config.allowIdleReallocation).toBe(true)
     expect(config.dryRun).toBe(false)
-    expect(config.maxFeePerGasWei).toBe(parseGwei('250'))
+    expect(config.kernel.maxFeePerGasWei).toBe(parseGwei('250'))
     expect(config.logLevel).toBe('info')
     expect(config.rpcUrlFallback).toBeUndefined()
-    expect(config.kernel).toStrictEqual({ stateDirectory: '/data/kernel', enrollment: 'enrolling' })
+    expect(config.kernel).toMatchObject({ stateDirectory: '/data/kernel', enrollment: 'enrolling' })
   })
 
   it.each(['KERNEL_STATE_DIR', 'KERNEL_ENROLLMENT'])('requires %s', name => {
-    expect(() => loadConfig({ ...BASE_ENV, [name]: '' })).toThrow(InvalidConfigError)
+    expect(() => loadConfig({ ...BASE_ENV, [name]: '' })).toThrow(InvalidKernelSettingError)
     expect(() => loadConfig({ ...BASE_ENV, [name]: '' })).toThrow(name)
   })
 
@@ -83,7 +87,7 @@ describe('loadConfig', () => {
     expect(config.minUtilizationDeltaBips).toBe(100)
     expect(config.allowIdleReallocation).toBe(false)
     expect(config.dryRun).toBe(true)
-    expect(config.maxFeePerGasWei).toBe(parseGwei('25.5'))
+    expect(config.kernel.maxFeePerGasWei).toBe(parseGwei('25.5'))
     expect(config.logLevel).toBe('debug')
   })
 
@@ -92,8 +96,6 @@ describe('loadConfig', () => {
     ['CHAIN_ID unsupported', { ...BASE_ENV, CHAIN_ID: '42' }, 'CHAIN_ID'],
     ['CHAIN_ID hex form', { ...BASE_ENV, CHAIN_ID: '0x1' }, 'CHAIN_ID'],
     ['RPC_URL missing', { ...BASE_ENV, RPC_URL: '' }, 'RPC_URL'],
-    ['finality missing', { ...BASE_ENV, FINALITY_8453: undefined }, 'FINALITY_8453'],
-    ['finality malformed', { ...BASE_ENV, FINALITY_8453: 'latest' }, 'FINALITY_8453'],
     [
       'private key malformed',
       { ...BASE_ENV, REALLOCATOR_PRIVATE_KEY: '0x1234' },
@@ -124,7 +126,6 @@ describe('loadConfig', () => {
       'REALLOCATION_INTERVAL_MS'
     ],
     ['bool malformed', { ...BASE_ENV, DRY_RUN: 'yes' }, 'DRY_RUN'],
-    ['fee malformed', { ...BASE_ENV, MAX_FEE_GWEI: '-1' }, 'MAX_FEE_GWEI'],
     ['log level unknown', { ...BASE_ENV, LOG_LEVEL: 'trace' }, 'LOG_LEVEL']
   ] as const)('fails loud on %s, naming the variable', (_label, env, name) => {
     expect(() => loadConfig(env)).toThrow(InvalidConfigError)
@@ -133,7 +134,27 @@ describe('loadConfig', () => {
 
   it.each([undefined, '', '  '])('refuses to start without MAX_FEE_GWEI (%j)', value => {
     expect(() => loadConfig({ ...BASE_ENV, MAX_FEE_GWEI: value })).toThrow(
-      'Missing required env var: MAX_FEE_GWEI'
+      'MAX_FEE_GWEI must be set'
     )
+  })
+
+  it.each([
+    [{ FINALITY_8453: undefined }, 'FINALITY_8453'],
+    [{ FINALITY_8453: 'latest' }, 'FINALITY_8453'],
+    [{ MAX_FEE_GWEI: '-1' }, 'MAX_FEE_GWEI'],
+    [{ MAX_FEE_GWEI: '0.000000001' }, 'cannot fund']
+  ])('refuses kernel settings kit refuses %#', (overrides, message) => {
+    expect(() => loadConfig({ ...BASE_ENV, ...overrides })).toThrow(InvalidKernelSettingError)
+    expect(() => loadConfig({ ...BASE_ENV, ...overrides })).toThrow(message)
+  })
+
+  it('prices the default gas ceiling at MAX_FEE_GWEI, with no spend settings of its own', () => {
+    const { kernel } = loadConfig({
+      ...BASE_ENV,
+      MAX_SPEND_ETH: 'ignored',
+      MAX_GAS_LIMIT: 'ignored'
+    })
+    expect(kernel.maxGasLimit).toBe(DEFAULT_MAX_GAS_LIMIT)
+    expect(kernel.maxSpendWei).toBe(parseGwei('250') * DEFAULT_MAX_GAS_LIMIT)
   })
 })

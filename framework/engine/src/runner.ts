@@ -1,3 +1,5 @@
+import { types } from 'node:util'
+
 import type { DerivedWrite, NodeRecord, Pending } from './core'
 import type { Data } from './data'
 import type {
@@ -25,21 +27,28 @@ import {
   JournalIoTimeoutError,
   JournalOverflowError,
   LaneOverflowError,
+  ObserverReentryError,
   PolicyReentryError,
   ReentrantPushError,
   RequestRefusedError,
   RunnerFinalizationError,
   WriteRefusedError
 } from './errors'
+import { MAX_TIMEOUT_MS } from './graph'
 import { compactJournalEntry } from './journal'
 
 /** Where a failed or overflowing journal is reported to have failed. */
 const JOURNAL = 'journal'
 
-/** The longest delay `setTimeout` honours; a longer one fires at once (https://nodejs.org/api/timers.html#settimeoutcallback-delay-args). */
-const MAX_TIMEOUT_MS = 2 ** 31 - 1
-
 export const DEFAULT_JOURNAL_IO_TIMEOUT_MS = 30_000
+
+/**
+ * A journal I/O deadline counts only time the event loop was free, in at least this many steps of at
+ * most {@link JOURNAL_IO_TICK_MS}: a loop blocked by a long synchronous step spends one step, so it
+ * cannot use up the budget of a write that already completed.
+ */
+const JOURNAL_IO_TICKS = 10
+const JOURNAL_IO_TICK_MS = 1_000
 
 type JournalLimits = Readonly<{ capacityBytes: number; ioTimeoutMs?: number }>
 
@@ -56,8 +65,23 @@ export const validateJournalLimits = (limits: JournalLimits) => {
     throw new GraphDefinitionError('a journal needs a positive safe-integer I/O timeout')
 }
 
+/**
+ * A committed step: each node it recorded, once, with its record as the step left it, and whether
+ * only the recovery scope runs.
+ */
+export type ObservedStep = Readonly<{
+  stamp: Stamp
+  recorded: readonly Readonly<{ node: string; record: NodeRecord<unknown> }>[]
+  wakes: readonly string[]
+  degraded: boolean
+}>
+
+/** Sees each committed step before it is journaled. It can neither act on the run nor stop it: engine SPEC §5.1. */
+export type StepObserver = (step: ObservedStep) => void
+
 export type RunnerOptions = Readonly<{
   now?: () => number
+  observe?: StepObserver
   /**
    * Written after each step and never awaited by one. A failed append, or more than
    * `capacityBytes` encoded bytes queued plus in flight, closes the journal and fails the graph
@@ -79,6 +103,8 @@ export type RunnerOptions = Readonly<{
 export type Runner = Readonly<{
   /** Whether this run records a journal. */
   hasJournal: boolean
+  /** Whether the observer threw or called the runner, after which it is never called again. */
+  observerFailed: boolean
   /** Returns once the push's step has propagated, unless an effect pushed while a step was running. */
   push<T, K extends SourceKind>(node: Source<T, K>, value: Written<T, K>): void
   /** A burst: one step over every write, in order. */
@@ -96,6 +122,12 @@ export type Runner = Readonly<{
    */
   stopped: Promise<unknown>
 }>
+
+const ignore = () => undefined
+
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+  ((typeof value === 'object' && value !== null) || typeof value === 'function') &&
+  typeof (value as { then?: unknown }).then === 'function'
 
 type Delivered = EffectRequest<Record<string, Every<unknown>>>
 
@@ -124,6 +156,8 @@ type LaneState = {
 
 export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner => {
   if (options.journal !== undefined) validateJournalLimits(options.journal)
+  if (options.observe !== undefined && typeof options.observe !== 'function')
+    throw new GraphDefinitionError('an observer must be a function')
   const now = options.now ?? Date.now
   const core = createCore(graph)
   const pending: (readonly Pending[])[] = []
@@ -193,17 +227,24 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
   ) => {
     const controller = new AbortController()
     const timeoutMs = journal?.ioTimeoutMs ?? DEFAULT_JOURNAL_IO_TIMEOUT_MS
-    let timer: ReturnType<typeof setTimeout> | undefined
+    const tickMs = Math.min(JOURNAL_IO_TICK_MS, timeoutMs / JOURNAL_IO_TICKS)
+    let timer: ReturnType<typeof setInterval> | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
+      let spent = 0
+      let last = performance.now()
+      timer = setInterval(() => {
+        const now = performance.now()
+        spent += Math.min(now - last, tickMs)
+        last = now
+        if (spent < timeoutMs) return
         controller.abort()
         reject(new JournalIoTimeoutError(operation, timeoutMs))
-      }, timeoutMs)
+      }, tickMs)
     })
     try {
       await Promise.race([Promise.resolve().then(() => run(controller.signal)), timeout])
     } finally {
-      clearTimeout(timer)
+      clearInterval(timer)
     }
   }
 
@@ -332,15 +373,53 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       policing = undefined
     }
   }
-  const refuseInPolicy = () => {
+  /** Set while the observer runs; a refusal drops it even if the observer caught it. */
+  let observing: { refused?: ObserverReentryError } | undefined
+  const refuseObserver = () => {
+    if (observing) throw (observing.refused ??= new ObserverReentryError())
+  }
+  /** Refuses a call into the runner from a lane policy or the step observer. */
+  const refuseReentry = () => {
+    refuseObserver()
     if (!policing) return
     policing.refused ??= new PolicyReentryError(policing.effect)
     throw policing.refused
   }
 
+  let observer = options.observe
+  const observe = (stamp: Stamp, recorded: readonly string[], wakes: readonly string[]) => {
+    if (!observer) return
+    const scope: { refused?: ObserverReentryError } = {}
+    observing = scope
+    try {
+      const step = Object.freeze({
+        stamp: Object.freeze({ seq: stamp.seq, at: stamp.at }),
+        recorded: Object.freeze(
+          recorded.map(node => Object.freeze({ node, record: core.record(node)! }))
+        ),
+        wakes: Object.freeze([...wakes]),
+        degraded: degraded !== undefined
+      })
+      const returned: unknown = observer(step)
+      const promised = types.isPromise(returned)
+      if (promised) void Promise.prototype.then.call(returned, ignore, ignore)
+      if (promised || isThenable(returned) || scope.refused) observer = undefined
+    } catch {
+      observer = undefined
+    } finally {
+      observing = undefined
+    }
+  }
+
   const samples = new Map(
     graph[layout].effects.map(effect => {
-      const named = Object.entries(effect.samples).map(([name, id]) => [name, () => core.read(id)])
+      const named = Object.entries(effect.samples).map(([name, id]) => [
+        name,
+        () => {
+          refuseObserver()
+          return core.read(id)
+        }
+      ])
       return [effect, Object.freeze(Object.fromEntries(named))]
     })
   )
@@ -429,15 +508,18 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
     signal,
     identity: job.identity,
     stamp: job.stamp,
-    now,
+    now: () => {
+      refuseObserver()
+      return now()
+    },
     note: note => {
-      refuseInPolicy()
+      refuseReentry()
       if (!finished)
         append({ kind: 'note', effect: job.effect.id, at: now(), note: freezeData(note) })
     },
     samples: samplesOf(job.effect),
     write: result => {
-      refuseInPolicy()
+      refuseReentry()
       if (finished || signal.aborted) return
       const results = job.effect.results
       if (results === undefined)
@@ -445,7 +527,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       enqueue([core.produced(results, result)])
     },
     stop: value => {
-      refuseInPolicy()
+      refuseReentry()
       if (!isActive(job.effect.id)) return
       const failed = degraded
       void abandon(true).then(
@@ -576,6 +658,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
   const propagate = (writes: readonly Pending[], at = now()) => {
     const wakes = writes.length === 0 ? core.due(at) : []
     if (writes.length === 0 && wakes.length === 0) return
+    if (observer && pushSeq === 0) observe({ seq: 0, at }, [...graph[layout].nodes.keys()], [])
     const stamp = { seq: ++pushSeq, at }
     let derived: readonly DerivedWrite[]
     try {
@@ -585,6 +668,8 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       rolledBack = { stamp, writes, wakes }
       throw error
     }
+    if (observer)
+      observe(stamp, [...new Set([...writes.map(w => w.node), ...derived.map(d => d.node)])], wakes)
     append({ kind: 'step', ...journaledStep({ stamp, writes, wakes }), derived })
     if (!live()) return
     armExpiry()
@@ -644,7 +729,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
   }
 
   const external = (writes: readonly SourceWrite[]) => {
-    refuseInPolicy()
+    refuseReentry()
     const first = writes[0]
     if (core.propagating() && first) throw new ReentrantPushError(first.node.id)
     if (finished) return
@@ -747,12 +832,15 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
 
   return {
     hasJournal: journal !== undefined,
+    get observerFailed() {
+      return options.observe !== undefined && observer === undefined
+    },
     push: (node, value) => external([{ node, value }]),
     pushAll: external,
     read,
     record: <T>(node: Node<T>) => core.record(node.id) as NodeRecord<T>,
     start: () => {
-      refuseInPolicy()
+      refuseReentry()
       if (finished || started) return
       started = true
       armExpiry()
@@ -772,7 +860,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       }
     },
     abandon: () => {
-      refuseInPolicy()
+      refuseReentry()
       return abandon()
     },
     stopped

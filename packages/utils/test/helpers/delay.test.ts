@@ -10,13 +10,4 @@ describe('delay', () => {
 
     expect(elapsed).toBeGreaterThanOrEqual(45)
   })
-
-  it('resolves immediately with 0ms', async () => {
-    let resolved = false
-    await delay(0).then(() => {
-      resolved = true
-    })
-
-    expect(resolved).toBe(true)
-  })
 })

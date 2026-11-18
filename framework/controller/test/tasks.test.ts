@@ -5,10 +5,10 @@ import { createRunner, keyedLevel, keyedMap, lane } from '@repo/engine'
 import { layoutOf } from '@repo/engine/testing'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { KernelHandle, KernelView, LogSink } from '../src'
-import type { PrepareOutcome, Task } from '../src/tasks'
+import type { KernelHandle, KernelHealth, KernelView } from '../src'
+import type { PrepareOutcome, Task, TaskEvent } from '../src/tasks'
 
-import { defineBot, intentIdOf, kernelDomain, logTasks, tasks, task } from '../src'
+import { defineBot, EvidenceDefectError, intentIdOf, kernelDomain, tasks, task } from '../src'
 
 const STEPS = [
   { kind: 'tx' as const, payload: { kind: 'tx' as const, to: '0xx', data: '0x', value: 0n } }
@@ -43,11 +43,7 @@ const family = (
     answer: (answer: Answer) => void
   }[] = []
   const submits: KernelRequest[] = []
-  const logged: [string, Record<string, unknown> | undefined][] = []
-  const logger: LogSink = {
-    info: (event, fields) => void logged.push([event, fields]),
-    warn: (event, fields) => void logged.push([event, fields])
-  }
+  const emitted: TaskEvent[] = []
   const { graph, ...nodes } = defineBot('tasks', b => {
     const raw = b.raw(g => {
       const writes = g.occurrences<KeyedWrite<Position>>('positions.writes')
@@ -71,6 +67,7 @@ const family = (
         domain,
         nodes: stand,
         view,
+        health: g.level<KernelHealth>('kernel.health'),
         start: async () => {},
         requestsFrom: () => {}
       }
@@ -122,9 +119,9 @@ const family = (
       on: { request: acts.requests },
       handle: ({ value }) => void submits.push(value)
     })
-    b.sink('record.log', {
+    b.sink('record.events', {
       on: { event: acts.events },
-      handle: ({ value }) => logTasks(logger, value)
+      handle: ({ value }) => void emitted.push(value)
     })
     return { ...raw, acts }
   })(undefined)
@@ -167,7 +164,13 @@ const family = (
   }
   const preparedOf = () =>
     submits.flatMap(request => (request.type === 'Submit' ? [request.plan.decision?.prepared] : []))
-  const events = (event: string) => logged.filter(([name]) => name === event).map(([, f]) => f)
+  const events = (type: TaskEvent['type']) =>
+    emitted
+      .filter(event => event.type === type)
+      .map(event => {
+        const { type: _, ...fields } = event
+        return fields
+      })
   return {
     graph,
     runner,
@@ -194,7 +197,7 @@ describe('a task family', () => {
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['b', 'c'])
     await bot.answer('c')
     await bot.answer('b')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['c', 'b'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['c', 'b'])
     const [first] = bot.submits
     expect(first?.type === 'Submit' && first.plan.evidence?.[0]?.id).toBe('facts/c')
     await bot.answer('a')
@@ -213,7 +216,7 @@ describe('a declined preparation', () => {
     bot.write({ a: { bid: 1n, read: 2 } })
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a'])
     await bot.answer('a')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a'])
     await bot.runner.abandon()
   })
 })
@@ -301,7 +304,7 @@ describe('an act on a chain fact and an offchain fact', () => {
     expect(bot.submits).toStrictEqual([])
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a'])
     await bot.answer('a', { ok: true, steps: STEPS })
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a'])
     await bot.runner.abandon()
   })
 
@@ -315,8 +318,8 @@ describe('an act on a chain fact and an offchain fact', () => {
       basis: { observedAt: 10 }
     })
     await bot.answer('a', { ok: true, steps: STEPS })
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'act', reason: 'fact_unbounded', fact: 'facts/a+quotes/a' }
+    expect(bot.events('dropped')).toStrictEqual([
+      { key: 'a', task: 'act', reason: 'fact_unbounded', fact: 'facts/a+quotes/a' }
     ])
     expect(bot.submits).toStrictEqual([])
     await bot.runner.abandon()
@@ -369,7 +372,7 @@ describe('a key that fails closed', () => {
     const [voided] = bot.asked
     throws = true
     bot.acceptingNewWork(true)
-    expect(bot.events('act.rejected')).toStrictEqual([{ id: 'a', reason: 'policy_threw' }])
+    expect(bot.events('rejected')).toStrictEqual([{ key: 'a', reason: 'policy_threw' }])
     await bot.answer('a')
     throws = false
     bot.acceptingNewWork(true)
@@ -430,14 +433,8 @@ describe('a key that fails closed', () => {
 
     await bot.answer('a', new Error('preparation failed'))
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['b'])
-    expect(bot.events('act.prepare_failed')).toStrictEqual([
-      {
-        id: 'a',
-        task: 'act',
-        ticket: voided!.id,
-        reason: 'prepare_threw',
-        error: 'Error'
-      }
+    expect(bot.events('prepare_failed')).toStrictEqual([
+      { key: 'a', task: 'act', ticket: voided!.id, reason: 'prepare_threw' }
     ])
     expect(bot.runner.read(bot.nodes.acts.backoff.state)!.keys.a?.act?.failures).toBe(1)
     expect(bot.submits).toStrictEqual([])
@@ -466,8 +463,8 @@ describe('a key that fails closed', () => {
     await bot.answer('a')
     throws = true
     bot.acceptingNewWork(false)
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'act', reason: 'policy_rejected' }
+    expect(bot.events('dropped')).toStrictEqual([
+      { key: 'a', task: 'act', reason: 'policy_rejected' }
     ])
     throws = false
     bot.acceptingNewWork(true)
@@ -494,14 +491,16 @@ describe('a policy return the runtime refuses', () => {
     }
     bot.acceptingNewWork(true)
     bot.write(entries)
-    expect(bot.events('act.rejected')).toStrictEqual(
-      Object.keys(malformed).map(id => ({ id, reason: 'policy_invalid' }))
+    expect(bot.events('rejected')).toStrictEqual(
+      Object.keys(malformed)
+        .toSorted()
+        .map(key => ({ key, reason: 'policy_invalid' }))
     )
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['good'])
     await bot.answer('good')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['good'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['good'])
     bot.acceptingNewWork(true)
-    expect(bot.events('act.rejected')).toHaveLength(Object.keys(malformed).length)
+    expect(bot.events('rejected')).toHaveLength(Object.keys(malformed).length)
     await bot.runner.abandon()
   })
 })
@@ -522,8 +521,8 @@ describe('a task whose fields change after it was built', () => {
     bot.acceptingNewWork(true)
     bot.write({ a: { bid: 1n } })
     await bot.answer('a')
-    expect(bot.events('act.rejected')).toStrictEqual([])
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a'])
+    expect(bot.events('rejected')).toStrictEqual([])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a'])
     await bot.runner.abandon()
   })
 })
@@ -539,9 +538,7 @@ describe('a policy whose task changes', () => {
     await bot.answer('a')
     name = 'two'
     bot.acceptingNewWork(true)
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'one', reason: 'task_changed' }
-    ])
+    expect(bot.events('dropped')).toStrictEqual([{ key: 'a', task: 'one', reason: 'task_changed' }])
     expect(bot.submits).toStrictEqual([])
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a'])
     const [fresh] = bot.asked
@@ -560,9 +557,7 @@ describe('a policy whose task changes', () => {
     await bot.answer('a')
     writes = ['B']
     bot.acceptingNewWork(true)
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'one', reason: 'task_changed' }
-    ])
+    expect(bot.events('dropped')).toStrictEqual([{ key: 'a', task: 'one', reason: 'task_changed' }])
     expect(bot.submits).toStrictEqual([])
     await bot.answer('a')
     const [submitted] = bot.submits
@@ -616,12 +611,11 @@ describe('a prepared act whose key backs off after an act the bot wrote raw', ()
     })
     await bot.answer('a')
     expect(bot.submits).toStrictEqual([])
+    const failed: readonly KernelActivity[] = [{ type: 'notice', intentId: raw, notice: 'failed' }]
     bot.runner.pushAll([
       {
         node: activity,
-        value: [
-          { type: 'notice', intentId: raw, notice: 'failed' }
-        ] as unknown as readonly KernelActivity[]
+        value: failed
       },
       {
         node: bot.nodes.view,
@@ -673,7 +667,7 @@ describe('an owned preparation', () => {
     }
     await bot.answer('a')
     await bot.answer('b')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a', 'b'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a', 'b'])
     await bot.runner.abandon()
   })
 
@@ -732,9 +726,7 @@ describe('an owned preparation', () => {
     const [stale] = bot.asked
     bot.write({ a: { bid: 2n } })
     await bot.answer('a')
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'act', reason: 'fact_changed' }
-    ])
+    expect(bot.events('dropped')).toStrictEqual([{ key: 'a', task: 'act', reason: 'fact_changed' }])
     expect(bot.submits).toStrictEqual([])
     const [fresh] = bot.asked
     await bot.answer('a')
@@ -753,7 +745,7 @@ describe('keys named like the fields every object inherits', () => {
     bot.write(Object.fromEntries(keys.map((key, i) => [key, { bid: BigInt(i + 1) }])))
     expect(bot.asked.map(entry => entry.key)).toContain('__proto__')
     while (bot.asked.length > 0) await bot.answer(bot.asked[0]!.key)
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual([
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual([
       '__proto__',
       'toString',
       'constructor'
@@ -769,8 +761,8 @@ describe('a fact that bounds no act', () => {
     bot.acceptingNewWork(true)
     bot.write({ a: { bid: 1n } }, null)
     await bot.answer('a')
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'act', reason: 'fact_unbounded', fact: 'facts/a' }
+    expect(bot.events('dropped')).toStrictEqual([
+      { key: 'a', task: 'act', reason: 'fact_unbounded', fact: 'facts/a' }
     ])
     bot.acceptingNewWork(true)
     expect(bot.asked).toStrictEqual([])
@@ -788,14 +780,12 @@ describe('a fact that bounds no act', () => {
     bot.clock.now = 100
     bot.fail()
     await bot.answer('a')
-    expect(bot.events('act.dropped')).toStrictEqual([
-      { id: 'a', task: 'act', reason: 'fact_expired' }
-    ])
+    expect(bot.events('dropped')).toStrictEqual([{ key: 'a', task: 'act', reason: 'fact_expired' }])
     bot.acceptingNewWork(true)
     expect(bot.asked).toStrictEqual([])
     bot.write({ a: { bid: 1n } }, 200)
     await bot.answer('a')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a'])
     await bot.runner.abandon()
   })
 })
@@ -814,9 +804,9 @@ describe('a preparation the runtime answers itself', () => {
     await bot.settle()
     await bot.settle()
     expect([a?.signal.aborted, b?.signal.aborted]).toStrictEqual([true, true])
-    expect(bot.events('act.prepare_failed')).toStrictEqual([
-      { id: 'a', task: 'act', ticket: a!.id, reason: 'prepare_timed_out' },
-      { id: 'b', task: 'act', ticket: b!.id, reason: 'prepare_timed_out' }
+    expect(bot.events('prepare_failed')).toStrictEqual([
+      { key: 'a', task: 'act', ticket: a!.id, reason: 'prepare_timed_out' },
+      { key: 'b', task: 'act', ticket: b!.id, reason: 'prepare_timed_out' }
     ])
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a', 'b', 'c'])
     await bot.answer('a')
@@ -826,33 +816,40 @@ describe('a preparation the runtime answers itself', () => {
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['c', 'a'])
     await bot.answer('a')
     await bot.answer('c')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a', 'c'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a', 'c'])
     await bot.runner.abandon()
   })
 
-  it('backs off a key whose handler throws, naming only the error, and runs on', async () => {
+  it('backs off a key whose handler throws, logging only its reason, and runs on', async () => {
+    const secret = 'https://rpc.example/secret'
+    class rpc_example_secret extends Error {}
     const bot = family(PER_KEY)
     bot.acceptingNewWork(true)
     bot.write({ a: { bid: 2n }, b: { bid: 1n } })
     const [a] = bot.asked
-    const thrown = new TypeError('fetch https://rpc.example/secret failed')
-    thrown.name = 'https://rpc.example/secret'
-    await bot.answer('a', thrown)
-    expect(bot.events('act.prepare_failed')).toStrictEqual([
-      { id: 'a', task: 'act', ticket: a!.id, reason: 'prepare_threw', error: 'TypeError' }
+    await bot.answer(
+      'a',
+      Object.assign(new rpc_example_secret(secret), { name: secret, code: secret })
+    )
+    expect(bot.events('prepare_failed')).toMatchObject([
+      { key: 'a', task: 'act', ticket: a!.id, reason: 'prepare_threw' }
     ])
     expect(bot.runner.read(bot.nodes.acts.backoff.state)!.keys.a?.act?.failures).toBe(1)
-    const opaque = new Error('opaque')
-    Object.defineProperty(opaque, 'constructor', {
-      get: () => {
-        throw new Error('no constructor')
-      }
-    })
+    const forged = Object.assign(
+      Object.create(
+        Object.assign(Object.create(Error.prototype), { constructor: { name: secret } })
+      ),
+      { name: secret, message: secret, cause: new Error(secret) }
+    )
     bot.write({ a: { bid: 2n }, b: { bid: 1n }, c: { bid: 3n } })
-    await bot.answer('c', opaque)
-    expect(bot.events('act.prepare_failed').at(-1)).toMatchObject({ id: 'c', error: 'Error' })
+    await bot.answer('c', forged)
+    expect(bot.events('prepare_failed').at(-1)).toMatchObject({
+      key: 'c',
+      reason: 'prepare_threw'
+    })
+    expect(JSON.stringify(bot.events('prepare_failed'))).not.toContain('rpc')
     await bot.answer('b')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['b'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['b'])
     expect(bot.asked).toStrictEqual([])
     await bot.runner.abandon()
   })
@@ -864,7 +861,7 @@ describe('a preparation the runtime answers itself', () => {
     const [a] = bot.asked
     await bot.runner.abandon()
     expect(a?.signal.aborted).toBe(true)
-    expect(bot.events('act.prepare_failed')).toStrictEqual([])
+    expect(bot.events('prepare_failed')).toStrictEqual([])
   })
 
   it('is refused at build without a timeout it can arm', () => {
@@ -909,7 +906,280 @@ describe('a key whose act an earlier run left behind', () => {
     expect(bot.asked.map(entry => entry.key)).toStrictEqual(['b', 'a'])
     await bot.answer('a')
     await bot.answer('b')
-    expect(bot.events('act.submitted').map(fields => fields?.id)).toStrictEqual(['a', 'b'])
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a', 'b'])
+    await bot.runner.abandon()
+  })
+})
+
+/** Each key's phase as the family's phase node holds it, or the key's status when not present. */
+const phasesOf = (bot: ReturnType<typeof family>) => {
+  const keyed = bot.runner.read(bot.nodes.acts.phase)!
+  expect(keyed.coverage).toStrictEqual({ status: 'complete' })
+  return Object.fromEntries(
+    Object.entries(keyed.keys).map(([key, record]) => [
+      key,
+      record.status === 'present' ? record.value : record.status
+    ])
+  )
+}
+
+describe("a family's phase node", () => {
+  afterEach(() => void vi.useRealTimers())
+
+  it('holds each key in the phase its own rules hold it in, then acts as it said', async () => {
+    const bot = family(
+      (bid, key) => {
+        if (key === 'r') throw new Error('the policy broke')
+        return PER_KEY(bid, key)
+      },
+      undefined,
+      60_000,
+      10,
+      'run',
+      10
+    )
+    const view = (acceptingNewWork: boolean) =>
+      bot.runner.push(bot.nodes.view, {
+        value: {
+          busy: ['f'],
+          numReservations: 0,
+          acceptingNewWork,
+          conflictMarks: { w: 5 },
+          oldestPendingMs: 0,
+          pendingAtCeiling: 0
+        },
+        basis: 'test'
+      })
+    const positions = {
+      s: { bid: 9n },
+      t: { bid: 8n },
+      y: { bid: 7n },
+      p: { bid: 6n },
+      b: { bid: 4n },
+      d: { bid: 3n },
+      w: { bid: 1n },
+      r: { bid: 1n },
+      f: { bid: 1n }
+    }
+    view(true)
+    bot.write(positions, 60_000, 4)
+    expect(bot.asked.map(entry => entry.key)).toStrictEqual(['s', 't', 'y', 'p', 'b', 'd'])
+    await bot.answer('s')
+    await bot.answer('t')
+    const refused = bot.submits.find(
+      request => request.type === 'Submit' && request.plan.decision?.key === 't'
+    )
+    bot.runner.push(bot.nodes.activity, [
+      {
+        type: 'notice',
+        intentId: refused?.type === 'Submit' ? refused.plan.intentId : '',
+        notice: 'refused',
+        code: 'evidence_expired',
+        reason: 'evidence facts/t expired'
+      }
+    ])
+    await bot.answer('b', { ok: false, reason: 'no_route', backoff: true })
+    await bot.answer('d', 'decline')
+    view(false)
+    await bot.answer('y')
+    bot.write({ ...positions, e: { bid: 2n }, g: { bid: 5n } }, 60_000, 4)
+
+    const act = { task: 'act' }
+    expect(phasesOf(bot)).toStrictEqual({
+      f: { ...act, phase: 'in_flight', priority: 1n },
+      s: { ...act, phase: 'submitted', priority: 9n },
+      y: { ...act, phase: 'ready', priority: 7n, detail: 'not_accepting' },
+      p: { ...act, phase: 'preparing', priority: 6n },
+      g: { ...act, phase: 'eligible', priority: 5n, detail: 'not_accepting' },
+      e: { ...act, phase: 'eligible', priority: 2n, detail: 'not_accepting' },
+      w: { ...act, phase: 'waiting', priority: 1n, detail: 'predates_own_effect' },
+      b: { ...act, phase: 'backed_off', priority: 4n, until: 1, failures: 1 },
+      d: { ...act, phase: 'declined', priority: 3n },
+      t: { ...act, phase: 'stale', priority: 8n },
+      r: { phase: 'rejected', detail: 'policy_threw' }
+    })
+
+    view(true)
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['s', 't', 'y'])
+    expect(bot.asked.map(entry => entry.key)).toStrictEqual(['p', 'g', 'e'])
+    expect(phasesOf(bot)).toMatchObject({
+      y: { phase: 'submitted' },
+      g: { phase: 'preparing' },
+      e: { phase: 'preparing' }
+    })
+    await bot.runner.abandon()
+  })
+
+  it('names the first slot rule an eligible key waits on', async () => {
+    const bot = family(PER_KEY, undefined, 60_000, 2, 'run', 1)
+    bot.acceptingNewWork(true)
+    bot.write({ a: { bid: 3n }, b: { bid: 2n }, c: { bid: 1n } })
+    expect(phasesOf(bot)).toMatchObject({
+      a: { phase: 'preparing' },
+      b: { phase: 'eligible', detail: 'lane_full' }
+    })
+    await bot.answer('a')
+    expect(phasesOf(bot)).toMatchObject({
+      a: { phase: 'submitted' },
+      b: { phase: 'preparing' },
+      c: { phase: 'eligible', detail: 'lane_full' }
+    })
+    await bot.answer('b')
+    expect(phasesOf(bot)).toMatchObject({
+      b: { phase: 'submitted' },
+      c: { phase: 'eligible', detail: 'reservations_full' }
+    })
+    await bot.runner.abandon()
+  })
+
+  it('moves a hold that ends by time alone at the next decision, as the family drops it', async () => {
+    const bot = family(PER_KEY)
+    bot.acceptingNewWork(true)
+    bot.write({ a: { bid: 1n } }, 1_000)
+    bot.acceptingNewWork(false)
+    await bot.answer('a', { ok: true, validUntil: 50, steps: STEPS })
+    const a = { task: 'act', priority: 1n }
+    expect(phasesOf(bot)).toStrictEqual({ a: { ...a, phase: 'ready', detail: 'not_accepting' } })
+
+    bot.clock.now = 50
+    expect(phasesOf(bot)).toStrictEqual({ a: { ...a, phase: 'ready', detail: 'not_accepting' } })
+    bot.acceptingNewWork(false)
+    expect(bot.events('dropped')).toStrictEqual([
+      { key: 'a', task: 'act', reason: 'preparation_expired' }
+    ])
+    expect(phasesOf(bot)).toStrictEqual({ a: { ...a, phase: 'eligible', detail: 'not_accepting' } })
+    await bot.runner.abandon()
+  })
+
+  it("moves to waiting at the step a fact expires, though the family's state is unchanged", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const bot = family(PER_KEY)
+    bot.runner.start()
+    bot.acceptingNewWork(false)
+    bot.write({ a: { bid: 1n } }, 1_000)
+    const a = { task: 'act', priority: 1n }
+    expect(phasesOf(bot)).toStrictEqual({ a: { ...a, phase: 'eligible', detail: 'not_accepting' } })
+    const state = bot.runner.record(bot.nodes.acts.state)
+
+    bot.clock.now = 1_000
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(bot.runner.record(bot.nodes.acts.state)).toBe(state)
+    expect(phasesOf(bot)).toStrictEqual({ a: { ...a, phase: 'waiting', detail: 'fact_expired' } })
+    await bot.runner.abandon()
+  })
+
+  it('reads the policy once per decision, and shows the answer that decision read', async () => {
+    const reads: string[] = []
+    const bot = family((bid, key) => {
+      reads.push(key)
+      return PER_KEY(bid + BigInt(reads.length), key)
+    })
+    bot.acceptingNewWork(false)
+    bot.write({ a: { bid: 0n }, b: { bid: 0n } })
+    expect(reads).toStrictEqual(['a', 'b'])
+    expect(phasesOf(bot)).toMatchObject({ a: { priority: 1n }, b: { priority: 2n } })
+
+    bot.acceptingNewWork(false)
+    expect(reads).toStrictEqual(['a', 'b', 'a', 'b'])
+    expect(phasesOf(bot)).toMatchObject({ a: { priority: 3n }, b: { priority: 4n } })
+    await bot.runner.abandon()
+  })
+
+  it('shows the last decision of a step in which the family decided twice', async () => {
+    const reads: string[] = []
+    const bot = family((bid, key) => {
+      reads.push(key)
+      return PER_KEY(bid + BigInt(reads.length), key)
+    })
+    bot.acceptingNewWork(true)
+    bot.write({ a: { bid: 0n } })
+    await bot.answer('a', {
+      ok: true,
+      validUntil: 60_000,
+      steps: STEPS,
+      exemptFromBackoff: ['reverted']
+    })
+    expect(bot.events('submitted').map(fields => fields.key)).toStrictEqual(['a'])
+    expect(reads).toStrictEqual(['a', 'a', 'a'])
+    expect(phasesOf(bot)).toStrictEqual({ a: { phase: 'submitted', task: 'act', priority: 3n } })
+    await bot.runner.abandon()
+  })
+
+  it('fails the decision on a malformed reading of a key that a ticket holds', async () => {
+    const bot = family(PER_KEY)
+    bot.acceptingNewWork(true)
+    bot.write({ a: { bid: 1n } })
+    expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a'])
+    const stopped = bot.runner.stopped.then(
+      () => undefined,
+      (error: unknown) => error
+    )
+    try {
+      bot.runner.push(bot.nodes.writes, {
+        coverage: 'complete',
+        entries: { a: { bid: 1n } },
+        basis: 'bad-basis',
+        expiry: 60_000
+      })
+    } catch {}
+    expect(await stopped).toBeInstanceOf(EvidenceDefectError)
+  })
+})
+
+describe('a projection the phase node cannot hold', () => {
+  it('fails only its own coverage, coded, when the projection throws', async () => {
+    const bot = family(PER_KEY)
+    bot.runner.push(bot.nodes.view, {
+      value: {
+        busy: {} as unknown as readonly string[],
+        numReservations: 0,
+        acceptingNewWork: false,
+        conflictMarks: {},
+        oldestPendingMs: 0,
+        pendingAtCeiling: 0
+      },
+      basis: 'test'
+    })
+    bot.write({ a: { bid: 1n } })
+    expect(bot.runner.read(bot.nodes.acts.phase)).toStrictEqual({
+      coverage: { status: 'failed', reason: 'projection_threw' },
+      keys: {}
+    })
+    await bot.runner.abandon()
+  })
+
+  it('keeps the record of a key whose phase a decision leaves unchanged, and replaces a changed one', async () => {
+    const bot = family(PER_KEY)
+    bot.acceptingNewWork(false)
+    bot.write({ a: { bid: 1n }, b: { bid: 2n } })
+    const first = bot.runner.read(bot.nodes.acts.phase)!
+    bot.write({ a: { bid: 5n }, b: { bid: 2n } })
+    const next = bot.runner.read(bot.nodes.acts.phase)!
+    expect(next.keys.b).toBe(first.keys.b)
+    expect(next.keys.a).not.toBe(first.keys.a)
+    expect(next.keys.a).toMatchObject({ status: 'present', value: { priority: 5n } })
+    await bot.runner.abandon()
+  })
+
+  it('fails only its own coverage, never the graph, on a busy key that is no data field', async () => {
+    const bot = family(PER_KEY)
+    bot.runner.push(bot.nodes.view, {
+      value: {
+        busy: ['$bigint'],
+        numReservations: 0,
+        acceptingNewWork: true,
+        conflictMarks: {},
+        oldestPendingMs: 0,
+        pendingAtCeiling: 0
+      },
+      basis: 'test'
+    })
+    bot.write({ a: { bid: 1n } })
+    expect(bot.runner.read(bot.nodes.acts.phase)).toStrictEqual({
+      coverage: { status: 'failed', reason: 'not_data' },
+      keys: {}
+    })
+    expect(bot.asked.map(entry => entry.key)).toStrictEqual(['a'])
     await bot.runner.abandon()
   })
 })

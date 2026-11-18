@@ -8,6 +8,7 @@ import type { LadderConfig } from '../../../src/domain/ladder'
 
 import { prepareRequest } from '../../../src/application/engine/market-decision'
 import { validateLadderConfig } from '../../../src/domain/ladder'
+import { marketParams } from './world.fixtures'
 
 const marketId: Hex = `0x${'55'.repeat(32)}`
 const YEAR = 31_536_000n
@@ -85,5 +86,16 @@ describe('prepareRequest', () => {
       completed: false
     })
     expect(centerOf(request)).toBe(500n)
+  })
+
+  test('asks for nothing while the market redeems first', () => {
+    const request = prepareRequest(reading(YEAR), config(), {
+      reference,
+      view: { live: [] },
+      crossings: {},
+      completed: false,
+      redemption: { params: marketParams, units: 40n }
+    })
+    expect(request).toBeUndefined()
   })
 })

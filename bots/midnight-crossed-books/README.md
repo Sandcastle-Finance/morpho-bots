@@ -43,9 +43,9 @@ The upstream schemas are checked in so builds never depend on network access:
 Regenerate types after updating either schema:
 
 ```sh
-pnpm --filter @morpho-org/midnight-crossed-books run generate:api
-pnpm format
-pnpm --filter @morpho-org/midnight-crossed-books run typecheck
+bun run --cwd bots/midnight-crossed-books generate:api
+bun run format
+bun run --cwd bots/midnight-crossed-books typecheck
 ```
 
 The generated files live under each infrastructure adapter's `generated/` directory and are not
@@ -92,7 +92,7 @@ kernel.
 ```sh
 RPC_URL=https://… DEPLOYER_PRIVATE_KEY=0x… \
 MIDNIGHT_ADDRESS=0xAdedD8ab6dE832766Fedf0FaC4992E5C4D3EA18A \
-pnpm --filter @repo/contracts run deploy:crossed-books-resolver
+bun run --cwd packages/contracts deploy:crossed-books-resolver
 ```
 
 ## Run
@@ -100,7 +100,7 @@ pnpm --filter @repo/contracts run deploy:crossed-books-resolver
 ```sh
 CHAIN_ID=8453 RPC_URL=https://… READONLY=true \
 SIMULATION_CALLER_ADDRESS=0x… \
-pnpm --filter @morpho-org/midnight-crossed-books run start
+bun run --cwd bots/midnight-crossed-books start
 ```
 
 Readonly mode scans at the latest block every `SCAN_INTERVAL_MS`, logs each profitable result as
@@ -164,6 +164,12 @@ start with none: it logs `kernel.stopped` with `outcome: refused` and exits.
 3. Wait for `kernel.running`, logged once the first ledger write lands.
 4. Set `KERNEL_ENROLLMENT=enrolled` and sync before anything else restarts the pod.
 
+### Journal
+
+The journal is one file per run under `$KERNEL_STATE_DIR/journal`. To get a run's journal after an
+incident, ask Platform to follow
+[Copy a run's journal off a bot pod](../../docs/JOURNAL-RETRIEVAL.md).
+
 ## Observability
 
 Every scan logs `match.computed` (`marketId`, `units`, `profit`) for each market whose resolution
@@ -180,8 +186,8 @@ liquidator's `id`, which is `marketId:borrower`.
 ## Test
 
 ```sh
-pnpm --filter @morpho-org/midnight-crossed-books run test
-pnpm --filter @repo/validators run test
+bun run --cwd bots/midnight-crossed-books test
+bun run --cwd framework/validators test
 forge test --root packages/contracts -vv
 ```
 

@@ -66,7 +66,7 @@ describe('packages/contracts/solidity/Executor.sol', () => {
             ? toFunctionSelector(entry as Parameters<typeof toFunctionSelector>[0])
             : entry.type
         )
-        .sort()
+        .toSorted()
 
     expect(
       (Executor.abi as readonly { type: string }[]).some(entry => entry.type === 'constructor')

@@ -52,13 +52,13 @@ describe('checkVaults', () => {
     ).rejects.toBeInstanceOf(InvalidVaultError)
   })
 
-  it('warns but does not throw when the allocator role is missing', async () => {
-    const { logger, events } = spyLogger()
-    await checkVaults(
+  it('still returns the adapter map when the allocator role is missing', async () => {
+    const { logger } = spyLogger()
+    const adapterByVault = await checkVaults(
       [VAULT],
       makeReads({ fetchVault: vi.fn(async () => ({ ...someVaultData(), isAllocator: false })) }),
       logger
     )
-    expect(events.some(e => e.event === 'allocator.missing_role' && e.level === 'warn')).toBe(true)
+    expect(adapterByVault).toEqual({ [VAULT]: ADAPTER })
   })
 })

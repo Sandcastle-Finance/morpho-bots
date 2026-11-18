@@ -322,6 +322,9 @@ export const createTelemetryRecordObserver = () => {
       case 'setup.check-warning':
         setupChecks.add(1, { check: event.check, status: event.status })
         return
+      // `transaction.settled` already counts each redemption by its `redeem` operation.
+      case 'position.redeemed':
+        return
       // Static configuration echoes; the log stream carries them and no aggregation needs them.
       case 'bot.configured':
       case 'market.configured':
@@ -334,6 +337,8 @@ export const createTelemetryRecordObserver = () => {
       case 'kernel.alarm':
       case 'kernel.stopped':
       case 'signer.policy_violation':
+      case 'signer.balance':
+      case 'signer.balance_failed':
       case 'journal.pruned':
       case 'journal.capped':
         return

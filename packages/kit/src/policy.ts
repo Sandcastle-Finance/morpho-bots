@@ -85,6 +85,25 @@ export type PolicyCheck =
 
 export type PolicyDecision = { ok: true } | { ok: false; check: PolicyCheck; message: string }
 
+/** The rule of `policy` that authorizes `tx`: its target's, for its selector or for raw calldata. */
+const ruleOf = (policy: Policy, tx: Pick<PolicyTx, 'to' | 'data'>) => {
+  const txSelector = tx.data.slice(0, 10).toLowerCase()
+  const targetRules = policy.rules?.filter(rule => isAddressEqual(tx.to, rule.target))
+  const rule =
+    targetRules?.find(candidate => candidate.selector?.toLowerCase() === txSelector) ??
+    targetRules?.find(candidate => candidate.selector === undefined)
+  return { targetRules, rule }
+}
+
+/**
+ * The gas ceiling {@link evaluatePolicy} holds a transaction to, other than a nonce fill.
+ * @param policy - The signer's policy.
+ * @param tx - The transaction's target and calldata.
+ * @returns Its rule's `maxGasLimit`, else the policy's.
+ */
+export const policyGasLimit = (policy: Policy, tx: Pick<PolicyTx, 'to' | 'data'>) =>
+  ruleOf(policy, tx).rule?.maxGasLimit ?? policy.maxGasLimit
+
 /**
  * Default-deny authorization for a prepared transaction, with zero value and a caller-pinned selector
  * (`exec_606BaXt` by default) and the fee/gas/size ceilings taken from the
@@ -109,10 +128,7 @@ export function evaluatePolicy(policy: Policy, tx: PolicyTx): PolicyDecision {
   }
   const fill = isAddressEqual(tx.to, tx.from)
   const txSelector = tx.data.slice(0, 10).toLowerCase()
-  const targetRules = policy.rules?.filter(rule => isAddressEqual(tx.to, rule.target))
-  const rule =
-    targetRules?.find(candidate => candidate.selector?.toLowerCase() === txSelector) ??
-    targetRules?.find(candidate => candidate.selector === undefined)
+  const { targetRules, rule } = ruleOf(policy, tx)
   if (fill) {
     if (tx.data !== '0x') return deny('maxDataBytes', 'a nonce fill carries no calldata')
   } else if (policy.rules) {
@@ -127,7 +143,7 @@ export function evaluatePolicy(policy: Policy, tx: PolicyTx): PolicyDecision {
   if (tx.maxFeePerGas > policy.maxFeePerGasWei) {
     return deny('maxFeePerGas', `maxFeePerGas ${tx.maxFeePerGas} exceeds policy ceiling`)
   }
-  const maxGasLimit = fill ? NONCE_FILL_MAX_GAS : (rule?.maxGasLimit ?? policy.maxGasLimit)
+  const maxGasLimit = fill ? NONCE_FILL_MAX_GAS : policyGasLimit(policy, tx)
   if (tx.gas > maxGasLimit) {
     return deny('gas', `gas ${tx.gas} exceeds policy ceiling`)
   }

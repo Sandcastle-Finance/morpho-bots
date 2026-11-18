@@ -80,7 +80,9 @@ market-read failure withdraws that market alone. Each decision carries its marke
 on every markets poll, each market not in flight reports once, from the outcome of an act that ended
 since its last report or else from its current decision, and that report becomes `cycle.completed`
 and the guardrail and observation records. A decision is never `applied`: an act it wants is
-`queued` until the kernel settles it.
+`queued` until the kernel settles it. An act its market superseded with a newer admitted act, and
+that ends abandoned or compensated, reports `observed` with `action: "superseded"` and is never
+counted: the newer act's outcome is the market's. One whose compensation failed counts as failed.
 
 ### Explicit invalidation
 
@@ -133,10 +135,10 @@ historical block and requires `anvil` on `PATH` plus an archive-capable `RPC_URL
 Run package-focused checks with:
 
 ```sh
-pnpm --filter @morpho-org/quoter-bot exec vitest run
-pnpm --filter @morpho-org/quoter-bot run test:e2e
-pnpm --filter @morpho-org/quoter-bot run typecheck
-pnpm --filter @morpho-org/quoter-bot run jsdoc:build
+bunx vitest run --project quoter-bot
+bun run --cwd bots/quoter-bot test:e2e
+bun run --cwd bots/quoter-bot typecheck
+bun run --cwd bots/quoter-bot jsdoc:check
 ```
 
 Before committing or when performing full validation, follow the repository-level validation suite

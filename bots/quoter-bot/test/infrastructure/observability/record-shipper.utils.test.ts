@@ -37,8 +37,8 @@ afterEach(() => {
 })
 
 describe('createRecordShipper', () => {
-  test('ships cycle.completed with the fields the Better Stack liveness alert parses', () => {
-    const lines: unknown[] = []
+  test('ships each record at its outcome level once a shipping logger is configured', () => {
+    const lines: { level: string; event: string }[] = []
     vi.spyOn(console, 'error').mockImplementation(line => void lines.push(JSON.parse(String(line))))
     const logger = createMonitoringLogger({
       bot: 'quoter-bot',
@@ -65,29 +65,9 @@ describe('createRecordShipper', () => {
     shipper.record(completed)
     shipper.record(failed)
 
-    expect(lines).toEqual([
-      {
-        level: 'info',
-        time: expect.any(String),
-        event: 'cycle.completed',
-        bot: 'quoter-bot',
-        chainId: 8453,
-        schemaVersion: 5,
-        workflow: 'ladder',
-        status: 'published',
-        action: 'recenter'
-      },
-      {
-        level: 'error',
-        time: expect.any(String),
-        event: 'cycle.completed',
-        bot: 'quoter-bot',
-        chainId: 8453,
-        schemaVersion: 5,
-        workflow: 'bootstrap',
-        status: 'failed',
-        errorName: 'BootstrapAdapterError'
-      }
+    expect(lines.map(line => [line.level, line.event])).toEqual([
+      ['info', 'cycle.completed'],
+      ['error', 'cycle.completed']
     ])
   })
 

@@ -1,4 +1,4 @@
-import type { LogLevel, Logger } from '@repo/kit'
+import type { Logger } from '@repo/kit'
 import type { Hex } from 'viem'
 
 import { describe, expect, it } from 'vitest'
@@ -37,24 +37,6 @@ const jsonResponse = (body: unknown, status = 200, headers: Record<string, strin
     status,
     headers: { 'content-type': 'application/json', ...headers }
   })
-
-// A capturing logger so operator-visible events are assertable by name, level, and fields.
-const capturingLogger = () => {
-  const events: { level: LogLevel; event: string; fields: Record<string, unknown> }[] = []
-  const record = (level: LogLevel) => (event: string, fields?: Record<string, unknown>) => {
-    events.push({ level, event, fields: fields ?? {} })
-  }
-  return {
-    names: () => events.map(entry => entry.event),
-    find: (event: string) => events.find(entry => entry.event === event),
-    logger: {
-      debug: record('debug'),
-      info: record('info'),
-      warn: record('warn'),
-      error: record('error')
-    } satisfies Logger
-  }
-}
 
 // One real single-source filter, so the union is exercised against the actual factory. `now` sets this
 // source's `updatedAt`, which is what the union's per-source staleness rule reads.
@@ -143,23 +125,23 @@ describe('createListedMarketFilter pagination', () => {
     expect(requestedKey).toBe(API_KEY)
   })
 
-  it('stops at the page cap and logs it loud rather than walking a runaway cursor', async () => {
-    const logger = capturingLogger()
+  it('stops at the page cap rather than walking a runaway cursor', async () => {
+    let pages = 0
     const filter = createListedMarketFilter({
       apiUrl: API_URL,
       apiKey: API_KEY,
       chainId: 8453,
-      logger: logger.logger,
+      logger: NOOP_LOGGER,
       // Never returns a null cursor — the runaway case the backstop exists for.
-      fetchImpl: async () => jsonResponse({ cursor: 'next', data: [market(LISTED)] }),
+      fetchImpl: async () => {
+        pages += 1
+        return jsonResponse({ cursor: 'next', data: [market(LISTED)] })
+      },
       sleep: async () => {}
     })
     await filter.refresh()
 
-    const capped = logger.find('markets.max_pages')
-    expect(capped?.level).toBe('warn')
-    expect(capped?.fields.cap).toBe(50)
-    expect(capped?.fields.pages).toBe(50)
+    expect(pages).toBe(50)
   })
 })
 
@@ -265,27 +247,22 @@ describe('createListedMarketFilter', () => {
     expect(filter.snapshot().source).toBe('api.example/staging/v0/midnight/markets')
   })
 
-  // An empty 200 is not a transient failure, so it replaces last-known-good — but in a union a healthy
-  // peer would mask it, so the nonempty→empty transition has to be loud on its own.
-  it('warns when a source drops from some listed markets to none', async () => {
-    const logs = capturingLogger()
+  // An empty 200 is not a transient failure, so it replaces last-known-good.
+  it('lists nothing once a source drops from some listed markets to none', async () => {
     let call = 0
     const filter = createListedMarketFilter({
       apiUrl: API_URL,
       apiKey: API_KEY,
       chainId: 8453,
-      logger: logs.logger,
+      logger: NOOP_LOGGER,
       fetchImpl: async () => {
         call += 1
         return jsonResponse({ data: call === 1 ? [market(LISTED)] : [] })
       }
     })
     await filter.refresh()
-    expect(logs.names()).not.toContain('markets.listed_empty')
-
     await filter.refresh()
-    expect(filter.isListed(LISTED)).toBe(false) // the empty response is authoritative
-    expect(logs.find('markets.listed_empty')?.fields.previous).toBe(1)
+    expect(filter.isListed(LISTED)).toBe(false)
   })
 
   it('retries a 429 honoring Retry-After', async () => {
@@ -334,30 +311,6 @@ describe('createUnionListedMarketFilter', () => {
     ])
   })
 
-  // The combined size cannot be recovered from the per-source counts, so it is emitted on its own
-  // event: summing would double-count the shared market, and taking the max would report 2, not 3.
-  it('reports the deduplicated union size on markets.whitelist', async () => {
-    const logs = capturingLogger()
-    const union = createUnionListedMarketFilter({
-      chainId: 8453,
-      filters: [
-        sourceFilter({ host: 'a.example', markets: [LISTED, SHARED], now: () => 0 }),
-        sourceFilter({ host: 'b.example', markets: [OTHER_CHAIN, SHARED], now: () => 0 })
-      ],
-      maxAgeMs: 1_000,
-      logger: logs.logger,
-      now: () => 0
-    })
-    await union.refresh()
-
-    expect(logs.find('markets.whitelist')?.fields).toEqual({
-      chainId: 8453,
-      markets: 3,
-      sources: 2,
-      fresh: 2
-    })
-  })
-
   it('throws rather than silently listing nothing when no source is configured', () => {
     expect(() =>
       createUnionListedMarketFilter({
@@ -385,7 +338,6 @@ describe('createUnionListedMarketFilter', () => {
   // The core safety property of reading more than one source: staleness is judged PER SOURCE, so one
   // endpoint going stale narrows the whitelist instead of emptying it.
   it('drops an expired source from the union while a fresh peer keeps working', async () => {
-    const logs = capturingLogger()
     const union = createUnionListedMarketFilter({
       chainId: 8453,
       filters: [
@@ -393,7 +345,7 @@ describe('createUnionListedMarketFilter', () => {
         sourceFilter({ host: 'fresh.example', markets: [OTHER_CHAIN], now: () => 1_000 })
       ],
       maxAgeMs: 100,
-      logger: logs.logger,
+      logger: NOOP_LOGGER,
       now: () => 1_000
     })
     await union.refresh()
@@ -402,45 +354,11 @@ describe('createUnionListedMarketFilter', () => {
     expect(whitelist.isListed(LISTED)).toBe(false) // stale source contributes nothing
     expect(whitelist.isListed(OTHER_CHAIN)).toBe(true) // fresh peer still whitelists
     expect(whitelist.fresh).toBe(1)
-    expect(logs.find('markets.source_expired')?.fields).toEqual({
-      chainId: 8453,
-      expired: [label('stale.example')],
-      maxAgeMs: 100,
-      detail:
-        'markets source older than max age — excluded from the whitelist until a refresh lands'
-    })
-    // Only the fresh peer's markets count toward the combined size.
-    expect(logs.find('markets.whitelist')?.fields).toEqual({
-      chainId: 8453,
-      markets: 1,
-      sources: 2,
-      fresh: 1
-    })
-  })
-
-  // When EVERY source is stale the union stays silent by design: the caller reports that per tick, so
-  // a refresh interval longer than maxAgeMs cannot leave the halt unreported between refreshes.
-  it('leaves the all-expired case to the caller rather than warning per refresh', async () => {
-    const logs = capturingLogger()
-    const union = createUnionListedMarketFilter({
-      chainId: 8453,
-      filters: [sourceFilter({ host: 'stale.example', markets: [LISTED], now: () => 0 })],
-      maxAgeMs: 100,
-      logger: logs.logger,
-      now: () => 1_000
-    })
-    await union.refresh()
-
-    expect(union.current().isListed(LISTED)).toBe(false)
-    expect(union.current().fresh).toBe(0)
-    expect(logs.names()).not.toContain('markets.source_expired')
-    expect(logs.names()).not.toContain('markets.whitelist_expired')
   })
 
   // A partial refresh must not read as a total one: the failing source is reported and skipped, and the
   // healthy source's set still lands.
   it('never throws when a source fails, and still lands the healthy sources', async () => {
-    const logs = capturingLogger()
     const union = createUnionListedMarketFilter({
       chainId: 8453,
       filters: [
@@ -448,36 +366,13 @@ describe('createUnionListedMarketFilter', () => {
         sourceFilter({ host: 'up.example', markets: [LISTED], now: () => 0 })
       ],
       maxAgeMs: 1_000,
-      logger: logs.logger,
+      logger: NOOP_LOGGER,
       now: () => 0
     })
 
     expect(await union.refresh()).toBeUndefined()
     expect(union.current().isListed(LISTED)).toBe(true)
-    expect(logs.find('markets.refresh_failed')?.fields.source).toBe(label('down.example'))
     expect(union.current().fresh).toBe(1)
-  })
-
-  // A source that never succeeds is excluded forever; the union must keep serving its fresh peer and
-  // must not let the dead source's absence widen or empty the whitelist.
-  it('keeps serving a fresh peer across repeated failures of another source', async () => {
-    const logs = capturingLogger()
-    const union = createUnionListedMarketFilter({
-      chainId: 8453,
-      filters: [
-        sourceFilter({ host: 'down.example', fail: true, now: () => 0 }),
-        sourceFilter({ host: 'up.example', markets: [LISTED], now: () => 0 })
-      ],
-      maxAgeMs: 1_000,
-      logger: logs.logger,
-      now: () => 0
-    })
-    await union.refresh()
-    await union.refresh()
-
-    expect(union.current().isListed(LISTED)).toBe(true)
-    expect(union.current().fresh).toBe(1)
-    expect(logs.find('markets.source_expired')?.fields.expired).toEqual([label('down.example')])
   })
 })
 

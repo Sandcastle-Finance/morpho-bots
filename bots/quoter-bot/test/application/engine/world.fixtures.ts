@@ -1,6 +1,8 @@
+import type { MarketParams } from '@morpho-org/midnight-sdk'
 import type { Address, Hex } from 'viem'
 
 import { MAX_TICK } from '@morpho-org/midnight-sdk'
+import { zeroAddress } from 'viem'
 
 import type { WorldOwnership, WorldReading } from '../../../src/application/engine/world'
 import type { MakerOfferGroup } from '../../../src/infrastructure/provider/offer-groups.utils'
@@ -8,6 +10,18 @@ import type { MakerOfferGroup } from '../../../src/infrastructure/provider/offer
 export const maker: Address = '0x1111111111111111111111111111111111111111'
 export const marketId: Hex = `0x${'11'.repeat(32)}`
 export const otherMarketId: Hex = `0x${'12'.repeat(32)}`
+/** A market as Midnight encodes it; no test that uses it derives `marketId` from it. */
+export const marketParams: MarketParams = {
+  chainId: 8453n,
+  midnight: '0x2222222222222222222222222222222222222222',
+  loanToken: '0x3333333333333333333333333333333333333333',
+  collateralParams: [],
+  maturity: 2_000_000n,
+  rcfThreshold: 0n,
+  enterGate: zeroAddress,
+  liquidatorGate: zeroAddress
+}
+
 export const accounting = {
   maker,
   marketIds: [marketId, otherMarketId],
@@ -56,7 +70,10 @@ const position = (market: Hex, credit: bigint) => ({
     lossFactor: 0n,
     maturity: 2_000_000n,
     tickSpacing: 4,
-    continuousFee: 0
+    continuousFee: 0,
+    params: marketParams,
+    withdrawable: 0n,
+    redeemableCredit: credit
   }
 })
 

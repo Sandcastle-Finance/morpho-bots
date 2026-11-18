@@ -5,12 +5,12 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "pnpm run generate:api && tsx scripts/build.ts",
+    "build": "bun run generate:api && tsx scripts/build.ts",
     "generate:api": "openapi-typescript morpho-api.json -o src/infrastructure/morpho-api/generated/morpho-api.types.ts && openapi-typescript router-api.json -o src/infrastructure/router-api/generated/router-api.types.ts",
-    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
+    "prestart": "bun run --filter @repo/contracts build && bun run build",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
     "test": "vitest run",
-    "typecheck": "pnpm run generate:api && tsc --noEmit"
+    "typecheck": "bun run generate:api && tsc --noEmit"
   },
   "dependencies": {
     "@repo/contracts": "workspace:*",

@@ -131,7 +131,10 @@ const proofOf = (
  */
 const cancelOnlyOf = (witness: unknown): ReadonlySet<string> | string => {
   if (witness === undefined) return new Set()
-  const groups = (witness as { cancelOnly?: unknown } | null)?.cancelOnly
+  const groups =
+    typeof witness === 'object' && witness !== null && 'cancelOnly' in witness
+      ? witness.cancelOnly
+      : undefined
   if (!Array.isArray(groups) || !groups.every(group => isHex(group) && size(group) === 32))
     return 'cancellation witness is not a list of groups'
   return new Set(groups.map(group => (group as Hex).toLowerCase()))
@@ -141,7 +144,8 @@ const cancelOnlyOf = (witness: unknown): ReadonlySet<string> | string => {
  * The production Midnight offers validator: it decodes every quoter action with the Midnight SDK
  * and ABIs and refuses anything it cannot fully decode. Commitments are consumption groups; a buy
  * reserves its loan token up to the group's cap; an opted-in borrowing sell reserves face debt in
- * its market up to its units cap, and a reduce-only sell reserves nothing.
+ * its market up to its units cap, and a reduce-only sell reserves nothing. A redemption, a direct
+ * `withdraw` of the maker's credit in an allowlisted market paid to the maker, commits nothing.
  */
 export const midnightOffersValidator = (options: Options): Validator => {
   const { chainId, maker } = options
@@ -345,10 +349,42 @@ export const midnightOffersValidator = (options: Options): Validator => {
     }
   }
 
+  /**
+   * The reading of a Midnight `withdraw`, or `undefined` for any other call. A redemption pays the
+   * maker's own credit back to the maker, so it moves nothing out of the maker's reach.
+   */
+  const redeemed = (data: Hex, witness: unknown): ValidatorReading | undefined => {
+    const call = strictCall(midnightAbi, data)
+    if (call?.functionName !== 'withdraw') return undefined
+    const [market, units, onBehalf, receiver] = call.args as readonly [
+      MarketParams,
+      bigint,
+      Address,
+      Address
+    ]
+    if (witness !== undefined) return refuse('a redemption takes no witness')
+    if (!same(onBehalf, maker)) return refuse('withdraws on behalf of another maker')
+    if (!same(receiver, maker)) return refuse('withdraws to a receiver other than the maker')
+    if (market.chainId !== BigInt(chainId))
+      return refuse('withdraws from a market on another chain')
+    if (!same(market.midnight, midnight))
+      return refuse('withdraws from a market on another Midnight')
+    if (
+      market.collateralParams.some(
+        (collateral, i, all) => i > 0 && BigInt(all[i - 1]!.token) >= BigInt(collateral.token)
+      )
+    )
+      return refuse('withdraws from a market whose collaterals are not strictly ascending')
+    if (!markets.has(MarketUtils.toId(market).toLowerCase()))
+      return refuse('market not allowlisted')
+    if (units === 0n) return refuse('withdraws nothing')
+    return NOTHING
+  }
+
   const cancelled = (data: Hex): { group: Hex } | { refusal: string } => {
     const call = strictCall(midnightAbi, data)
     if (call?.functionName !== 'setConsumed') return { refusal: 'only setConsumed cancels' }
-    const [group, amount, onBehalf] = call.args as readonly [Hex, bigint, Address]
+    const [group, amount, onBehalf] = call.args
     if (amount !== MAX_OFFER_CAP) return { refusal: 'a partial setConsumed is not a cancellation' }
     if (!same(onBehalf, maker)) return { refusal: 'cancels on behalf of another maker' }
     return { group }
@@ -365,7 +401,7 @@ export const midnightOffersValidator = (options: Options): Validator => {
       const call = strictCall(setterRatifierAbi, data)
       if (call?.functionName !== 'setIsRootRatified')
         return refuse('only setIsRootRatified is recognized')
-      const [ratifiedFor, root, ratified] = call.args as readonly [Address, Hex, boolean]
+      const [ratifiedFor, root, ratified] = call.args
       if (!same(ratifiedFor, maker)) return refuse('ratifies for another maker')
       if (!ratified) return refuse('unratifying is not modeled')
       const tree = treeOf(witness)
@@ -375,6 +411,8 @@ export const midnightOffersValidator = (options: Options): Validator => {
       return creating(tree, setter, 'inclusion')
     }
     if (same(payload.to, midnight)) {
+      const redemption = redeemed(data, witness)
+      if (redemption) return redemption
       const unheld = cancelOnlyOf(witness)
       if (typeof unheld === 'string') return refuse(unheld)
       const retiring = (groups: readonly Hex[]): ValidatorReading => ({
@@ -430,7 +468,7 @@ export const midnightOffersValidator = (options: Options): Validator => {
     if (same(payload.to, setter)) {
       const call = strictCall(setterRatifierAbi, payload.data as Hex)
       if (call?.functionName !== 'setIsRootRatified') return false
-      const [, root] = call.args as readonly [Address, Hex, boolean]
+      const [, root] = call.args
       return logged(
         logs,
         setter,
@@ -458,7 +496,8 @@ export const midnightOffersValidator = (options: Options): Validator => {
 
   return {
     id: 'midnight-offers',
-    version: 2,
+    version: 3,
+    accepts: [2],
     claims: payload =>
       payload.kind === 'typed'
         ? same(payload.domain.verifyingContract ?? '', ecrecover)

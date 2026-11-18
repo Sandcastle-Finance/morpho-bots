@@ -1,18 +1,65 @@
 {
   "name": "@morpho-org/morpho-bots",
   "private": true,
+  "workspaces": {
+    "packages": [
+      "bots/*",
+      "packages/*",
+      "framework/*",
+      "tools/*"
+    ],
+    "catalog": {
+      "@aws-sdk/client-kms": "3.1101.0",
+      "@opentelemetry/api": "1.9.1",
+      "@tanstack/react-form": "1.20.0",
+      "@tanstack/react-table": "8.21.3",
+      "@loglayer/transport-betterstack": "2.2.0",
+      "@morpho-org/blue-sdk": "6.7.0",
+      "@morpho-org/blue-sdk-viem": "5.4.0",
+      "@morpho-org/midnight-sdk": "1.3.0",
+      "@morpho-org/morpho-ts": "2.10.0",
+      "@morpho-org/viem-dlc": "0.0.19",
+      "@noble/curves": "1.9.1",
+      "@types/node": "24.7.0",
+      "@types/react": "19.2.18",
+      "@types/react-dom": "19.2.4",
+      "esbuild": "0.28.1",
+      "execa": "9.6.0",
+      "executooor-viem": "^1.3.3",
+      "husky": "^9.1.5",
+      "knip": "^5.86.0",
+      "lint-staged": "^16.1.2",
+      "loglayer": "9.3.0",
+      "openapi-fetch": "0.17.0",
+      "openapi-typescript": "^7.13.0",
+      "react": "19.2.8",
+      "react-dom": "19.2.8",
+      "oxfmt": "^0.78.0",
+      "oxlint": "1.93.0",
+      "oxlint-tsgolint": "^7.0.2007",
+      "solc": "0.8.35",
+      "soltag": "^0.0.17",
+      "tsx": "4.22.0",
+      "typescript": "6.0.2",
+      "viem": "2.57.19",
+      "vite": "7.3.7",
+      "vitest": "4.1.12",
+      "zod": "4.6.6"
+    }
+  },
   "scripts": {
-    "build": "pnpm --filter @repo/contracts run build",
+    "build": "bun run --cwd packages/contracts build",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "knip": "knip",
-    "lint": "oxlint --no-error-on-unmatched-pattern && pnpm run lint:playground-smoke && pnpm --filter @repo/oxlint-plugin run check:markdown && pnpm --filter @repo/oxlint-plugin run check:specs",
+    "lint": "oxlint --no-error-on-unmatched-pattern && bun run lint:playground-smoke && bun run --cwd packages/oxlint-plugin check:markdown && bun run --cwd packages/oxlint-plugin check:specs",
     "lint:fix": "oxlint --fix --no-error-on-unmatched-pattern",
     "lint:playground-smoke": "oxlint --config bots/quoter-bot/scripts/playground-smoke.oxlintrc.json bots/quoter-bot/scripts/playground-smoke*.mjs",
-    "quoter-bot:playground": "pnpm --filter @morpho-org/quoter-bot run playground:serve",
+    "quoter-bot:playground": "bun run --cwd bots/quoter-bot playground:serve",
     "prepare": "husky",
-    "test": "vitest run && pnpm --filter @morpho-org/quoter-bot run playground:test",
-    "sessions": "pnpm --silent --filter @repo/sessions run sessions"
+    "test": "vitest run && bun run --cwd bots/quoter-bot playground:test",
+    "sessions": "bun run --silent --cwd tools/sessions sessions",
+    "journal": "node tools/journal/src/bin.mjs"
   },
   "devDependencies": {
     "@repo/typescript-config": "workspace:*",
@@ -28,8 +75,19 @@
     "vite": "catalog:",
     "vitest": "catalog:"
   },
+  "overrides": {
+    "@slack/socket-mode>ws": "8.23.0",
+    "solc>tmp": "0.2.7",
+    "viem>ws": "8.23.0"
+  },
   "engines": {
     "node": "^24.14.1"
   },
-  "packageManager": "pnpm@11.11.0"
+  "packageManager": "bun@1.4.4",
+  "patchedDependencies": {
+    "soltag@0.0.17": "patches/soltag@0.0.17.patch"
+  },
+  "trustedDependencies": [
+    "esbuild"
+  ]
 }

@@ -9,6 +9,7 @@ export {
   JournalOverflowError,
   LaneOverflowError,
   NotDataError,
+  ObserverReentryError,
   PolicyReentryError,
   ReentrantPushError,
   RequestRefusedError,
@@ -51,9 +52,21 @@ export type {
 } from './graph'
 export { createGraph, emitTo, every, lane, latest, sample, sourceWrite, watch } from './graph'
 export type { KeyedMapOptions, KeyRecord, Keyed, KeyedWrite, KeyRead } from './keyed'
-export { keyedLevel, keyedMap, keyRecord, UNREAD } from './keyed'
+export { isKeyed, keyedLevel, keyedMap, keyRecord, UNREAD } from './keyed'
 export { reachable } from './reach'
+export type {
+  EffectDescription,
+  EffectPolicy,
+  GraphDescription,
+  LaneDescription,
+  NodeDescription,
+  NodeProducer,
+  OperatorDescription,
+  ReadDescription,
+  ReadMode
+} from './describe'
+export { describeGraph, GRAPH_DESCRIPTION_FORMAT } from './describe'
 export type { JournalDeltaShapeState, JournalEntry, JournalSink, JournalWrite } from './journal'
 export { advanceJournalWriteShape, expandJournalWrite, JOURNAL_FORMAT } from './journal'
-export type { Runner, RunnerOptions } from './runner'
+export type { ObservedStep, Runner, RunnerOptions, StepObserver } from './runner'
 export { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS, validateJournalLimits } from './runner'

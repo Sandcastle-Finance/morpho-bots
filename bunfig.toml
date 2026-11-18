@@ -1,0 +1,57 @@
+# Never load .env files into scripts: the bots read them explicitly with `node --env-file-if-exists`.
+env = false
+
+[install]
+# Each package sees only the dependencies it declares.
+linker = "isolated"
+globalStore = false
+auto = "disable"
+exact = true
+# Install only versions published at least 3 days ago (seconds).
+minimumReleaseAge = 259200
+# Bun matches exact names, not scope globs: list every first-party @morpho-org package in the tree.
+minimumReleaseAgeExcludes = [
+  "@morpho-org/blue-sdk",
+  "@morpho-org/blue-sdk-viem",
+  "@morpho-org/midnight-sdk",
+  "@morpho-org/morpho-sdk",
+  "@morpho-org/morpho-ts",
+  "@morpho-org/viem-dlc"
+]
+
+[run]
+# Scripts run on Node: never alias `node` to bun.
+bun = false
+
+# Why package.json pins what it pins (JSON holds no comments):
+#
+# trustedDependencies: no dependency lifecycle script runs unless listed. esbuild is the only
+# dependency in the tree that needs one; any addition is a reviewable change. @swc/core stays out:
+# its postinstall only probes for the platform binary, which ships as an optional dependency.
+#
+# workspaces.catalog:
+# - Entries are pinned exactly where a range would resolve higher than the lockfile; relaxing any of
+#   them is a separate, deliberate bump.
+# - @aws-sdk/client-kms: pinned exactly for the quoter-bot direct-KMS path.
+# - @opentelemetry/api: shared by @repo/telemetry (SDK setup) and quoter-bot (metric derivation): one
+#   copy keeps the global tracer/meter provider registration coherent across packages.
+# - @morpho-org/blue-sdk: matches what @morpho-org/morpho-sdk (quoter-bot) resolves, so one blue-sdk
+#   instance.
+# - oxlint: newer minors change rule behavior, and each needs a matching oxlint-tsgolint (1.93.0
+#   needs >= 7.0.2005); bump both together, deliberately, in a separate change.
+# - solc: pinned exactly. solc determines the compiled bytecode of the soltag `sol` lens templates
+#   and the Executor; a silent compiler bump would invalidate the recorded explorer-verification
+#   settings (0.8.35, optimizer runs=200).
+# - zod: must match the zod that @morpho-org/morpho-sdk (and knip) resolve. viem's transitive
+#   `abitype` declares an optional peer on zod, so a workspace package holding a different zod major
+#   gets its own peer-variation copy of viem: two `BaseError` classes, and every cross-package
+#   `instanceof` against a viem error silently returns false. test/viem-dedupe.test.ts guards it.
+#
+# overrides (a `parent>child` key applies only to `child` under `parent`):
+# - solc>tmp: GHSA-ph9p-34f9-6g65, GHSA-52f5-9888-hmc6. solc (pinned, see catalog) pins tmp 0.0.33
+#   exactly. solc-js moved to tmp 0.2.6 in solc 0.8.37; 0.2.7 also fixes GHSA-7c78-jf6q-g5cm in
+#   0.2.6. Drop this once solc is bumped past a release that ships a fixed tmp.
+# - viem>ws: viem 2.57.19 (catalog) pins ws 8.21.0 exactly; this keeps ws >= 8.23.0 to clear
+#   AIKIDO-2026-844803. Drop this once the catalog's viem pins ws >= 8.23.0 on its own.
+# - @slack/socket-mode>ws: keeps ws >= 8.23.0 to clear AIKIDO-2026-844803. Drop this once socket-mode
+#   resolves ws >= 8.23.0 on its own.

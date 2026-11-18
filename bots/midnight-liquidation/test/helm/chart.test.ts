@@ -78,21 +78,21 @@ describe('midnight-liquidation Helm chart', () => {
     expect(second).not.toBe(first)
   }, 30_000)
 
-  it('rejects replicas above one', async () => {
-    const [statefulSet, values] = await Promise.all([
-      readChartFile('templates/statefulset.yaml'),
-      readChartFile('values.yaml')
-    ])
-    const guard = [
-      '{{- if not (has (int .Values.replicas) (list 0 1)) }}',
-      '{{ fail (printf "midnight-liquidation: replicas must be 0 or 1, got %v: ' +
-        'every pod signs with the same key and keeps its own nonce cursor" .Values.replicas) }}',
-      '{{- end }}'
-    ].join('')
-
-    expect(statefulSet).toContain(guard)
-    expect(values).toContain('replicas: 1')
-  })
+  it('renders replicas 0 or 1 and rejects anything else', async () => {
+    await expect(renderStatefulSet()).resolves.toContain('  replicas: 1\n')
+    await expect(renderStatefulSet('--set-string', 'replicas=0')).resolves.toContain(
+      '  replicas: 0\n'
+    )
+    for (const flag of [
+      ['--set', 'replicas=2'],
+      ['--set-string', 'replicas=3e0'],
+      ['--set-string', 'replicas=1.0']
+    ]) {
+      await expect(renderStatefulSet(...flag)).rejects.toThrow(
+        'midnight-liquidation: replicas must be 0 or 1'
+      )
+    }
+  }, 30_000)
 
   it('gives a stopping pod two minutes to settle what the kernel holds', async () => {
     const [statefulSet, values] = await Promise.all([

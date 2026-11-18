@@ -1,11 +1,11 @@
-import type { Finality, LogLevel } from '@repo/kit'
+import type { KernelSettings, LogLevel } from '@repo/kit'
 import type { Venue } from '@repo/swaps'
 import type { Address, Chain, Hex } from 'viem'
 
 import { Executor } from '@repo/contracts'
-import { blocksFor, blockTimeMs, feeCeiling, parseFinality, stepCap } from '@repo/kit'
+import { blocksFor, blockTimeMs, parseKernelSettings } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
-import { getAddress, isAddress, isHex, parseEther, parseGwei } from 'viem'
+import { getAddress, isAddress, isHex } from 'viem'
 import { base, mainnet } from 'viem/chains'
 
 import { InvalidConfigError } from './errors'
@@ -126,11 +126,6 @@ const CHAIN_MAP: Record<number, ChainConfig> = {
 }
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const
-
-// Floor for `MAX_GAS_LIMIT`. Below the intrinsic cost of the cheapest possible transaction, the
-// signing policy denies every prepared tx (`policy.ts` rejects `tx.gas > maxGasLimit`) while the
-// process stays up and healthy — a silent do-nothing bot. Fail at startup instead.
-const MIN_GAS_LIMIT = 21_000n
 
 const PRIVATE_KEY_HEX_LENGTH = 66 // '0x' + 32 bytes
 
@@ -268,14 +263,8 @@ export type ProbeConfig = {
   ladderSizes: string[]
 }
 
-export type KernelStoreConfig = {
-  stateDirectory: string
-  enrollment: 'enrolling' | 'enrolled'
-}
-
 export type Config = {
   chainId: number
-  finality: Finality
   chain: Chain
   midnight: Address
   wrappedNative: Address
@@ -284,8 +273,6 @@ export type Config = {
   sendLifeMs: number
   /** Chain-specific runtime values threaded into the kernel and the balance monitor. */
   tuning: TuningConfig
-  /** Ceiling on a signed tx's gas limit, enforced by the signing policy. See `maxSpendWei`. */
-  maxGasLimit: bigint
   rpcUrl: string
   rpcUrlFallback: string | undefined
   liquidatorPrivateKey: Hex
@@ -301,14 +288,8 @@ export type Config = {
   /** Venue-probing knobs. */
   probe: ProbeConfig
   quoting: QuotingConfig
-  /** Where the kernel keeps the account's ledger, and whether that ledger must already exist. */
-  kernel: KernelStoreConfig
-  maxFeePerGasWei: bigint
-  /**
-   * `MAX_SPEND_ETH` in wei — the ceiling on `gas * maxFeePerGas` for one transaction, and the only
-   * field here that bounds spend. `maxGasLimit` and `maxFeePerGasWei` bound its two factors.
-   */
-  maxSpendWei: bigint
+  /** Spend bounds are `MAX_SPEND_ETH` and `MAX_GAS_LIMIT`, both required. */
+  kernel: KernelSettings
   logLevel: LogLevel
 }
 
@@ -342,26 +323,19 @@ function intEnv(
   return value
 }
 
-// Parses an optional non-negative integer env var into a bigint, with a default and optional min
-// bound. Zero stays legal by default — it is a meaningful value for the backoff knobs.
-function bigintEnv(env: Env, name: string, def: bigint, bounds: { min?: bigint } = {}): bigint {
+// Parses an optional non-negative integer env var into a bigint, with a default. Zero stays legal —
+// it is a meaningful value for the backoff knobs.
+function bigintEnv(env: Env, name: string, def: bigint): bigint {
   const raw = env[name]?.trim()
-  return raw ? bigintFrom(env, name, raw, bounds) : def
-}
-
-function bigintFrom(env: Env, name: string, raw: string, bounds: { min?: bigint }): bigint {
+  if (!raw) return def
   if (!/^\d+$/.test(raw)) {
     throw new InvalidConfigError(`${name} must be a non-negative integer, got: ${env[name]}`)
   }
-  const value = BigInt(raw)
-  if (bounds.min !== undefined && value < bounds.min) {
-    throw new InvalidConfigError(`${name} must be at least ${bounds.min}, got: ${env[name]}`)
-  }
-  return value
+  return BigInt(raw)
 }
 
 // Parses an optional positive decimal env var, with a default and optional min bound. Decimal form
-// only (same regex as MAX_FEE_GWEI) — rejects hex/exponent so it agrees with the other validators.
+// only — rejects hex/exponent so it agrees with the other validators.
 function numberEnv(env: Env, name: string, def: number, bounds: { min?: number } = {}): number {
   const raw = env[name]?.trim()
   if (!raw) return def
@@ -473,31 +447,6 @@ function addressListEnv(env: Env, name: string): Address[] {
 }
 
 /**
- * `KERNEL_STATE_DIR` holds the kernel's ledger and must survive a restart. `KERNEL_ENROLLMENT` is
- * `enrolling` for the first start of a fresh account and `enrolled` for every later one.
- */
-function kernelConfig(env: Env): KernelStoreConfig {
-  const stateDirectory = required(env, 'KERNEL_STATE_DIR').trim()
-  const enrollment = required(env, 'KERNEL_ENROLLMENT').trim()
-  if (enrollment !== 'enrolling' && enrollment !== 'enrolled') {
-    throw new InvalidConfigError(
-      `KERNEL_ENROLLMENT must be "enrolling" or "enrolled", got: ${env.KERNEL_ENROLLMENT}`
-    )
-  }
-  if (env.POSITION_LIQUIDATION_COOLDOWN_MS?.trim()) {
-    throw new InvalidConfigError(
-      'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported; failed positions back off by block'
-    )
-  }
-  if (env.PRIORITY_FEE_GWEI?.trim()) {
-    throw new InvalidConfigError(
-      'PRIORITY_FEE_GWEI is no longer supported; the first tip derives from MAX_FEE_GWEI'
-    )
-  }
-  return { stateDirectory, enrollment }
-}
-
-/**
  * Reads the full env table into a typed, validated {@link Config}. Throws on any missing
  * required var, malformed value, or unknown `CHAIN_ID` — the bot must fail loud at startup
  * rather than run half-configured. Onchain checks (e.g. that `EXECUTOOOR_ADDRESS` holds code)
@@ -526,14 +475,6 @@ export function loadConfig(
   // `tuning` is threaded to kit as-is; `defaults` only ever appears in the `def` position of the
   // env parsers below, so an explicitly-set env var always wins.
   const { tuning, defaults } = chainConfig
-  const finalityName = `FINALITY_${chainId}`
-  const finality = parseFinality(required(env, finalityName).trim())
-  if (finality === undefined) {
-    throw new InvalidConfigError(
-      `${finalityName} must be safe, finalized, or a positive block depth, got: ${env[finalityName]}`
-    )
-  }
-
   const rpcUrl = required(env, 'RPC_URL')
 
   const liquidatorPrivateKey = required(env, 'LIQUIDATOR_PRIVATE_KEY')
@@ -560,26 +501,6 @@ export function loadConfig(
   if (!isLogLevel(logLevel)) {
     throw new InvalidConfigError(
       `LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')}, got: ${env.LOG_LEVEL}`
-    )
-  }
-
-  const maxFeeGwei = required(env, 'MAX_FEE_GWEI').trim()
-  if (!/^\d+(\.\d+)?$/.test(maxFeeGwei) || Number(maxFeeGwei) <= 0) {
-    throw new InvalidConfigError(`MAX_FEE_GWEI must be a positive number, got: ${env.MAX_FEE_GWEI}`)
-  }
-
-  const maxFeePerGasWei = parseGwei(maxFeeGwei)
-
-  const maxSpendEth = required(env, 'MAX_SPEND_ETH').trim()
-  if (!/^\d+(\.\d+)?$/.test(maxSpendEth) || Number(maxSpendEth) <= 0) {
-    throw new InvalidConfigError(
-      `MAX_SPEND_ETH must be a positive decimal, got: ${env.MAX_SPEND_ETH}`
-    )
-  }
-  const maxSpendWei = parseEther(maxSpendEth)
-  if (stepCap(feeCeiling(maxFeePerGasWei, maxSpendWei)) <= 0n) {
-    throw new InvalidConfigError(
-      `MAX_FEE_GWEI (${maxFeeGwei}) and MAX_SPEND_ETH (${maxSpendEth}) cannot fund a nonce fill and a step bid below it`
     )
   }
 
@@ -664,18 +585,25 @@ export function loadConfig(
     healthFactorLte: numberEnv(env, 'HEALTH_FACTOR_LTE', DEFAULT_HEALTH_FACTOR_LTE, { min: 1 })
   }
 
+  if (env.POSITION_LIQUIDATION_COOLDOWN_MS?.trim()) {
+    throw new InvalidConfigError(
+      'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported; failed positions back off by block'
+    )
+  }
+  if (env.PRIORITY_FEE_GWEI?.trim()) {
+    throw new InvalidConfigError(
+      'PRIORITY_FEE_GWEI is no longer supported; the first tip derives from MAX_FEE_GWEI'
+    )
+  }
+
   return {
     chainId,
-    finality,
     chain: chainConfig.chain,
     midnight: chainConfig.midnight,
     wrappedNative: chainConfig.wrappedNative,
     worldValidMs: chainConfig.worldValidMs,
     sendLifeMs: chainConfig.sendLifeMs,
     tuning,
-    maxGasLimit: bigintFrom(env, 'MAX_GAS_LIMIT', required(env, 'MAX_GAS_LIMIT').trim(), {
-      min: MIN_GAS_LIMIT
-    }),
     rpcUrl,
     rpcUrlFallback: env.RPC_URL_FALLBACK?.trim() || undefined,
     liquidatorPrivateKey,
@@ -686,9 +614,7 @@ export function loadConfig(
     venues,
     probe,
     quoting,
-    kernel: kernelConfig(env),
-    maxFeePerGasWei,
-    maxSpendWei,
+    kernel: parseKernelSettings(env, chainConfig.chain, { spendBounds: 'configured' }),
     logLevel
   }
 }

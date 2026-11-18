@@ -1,3 +1,4 @@
+import { InvalidKernelSettingError } from '@repo/kit'
 import { describe, expect, test } from 'vitest'
 
 import { loadConfig } from '../src/config'
@@ -14,7 +15,10 @@ const WRITE = {
   KERNEL_ENROLLMENT: 'enrolled',
   MAX_FEE_GWEI: '0.5',
   MAX_SPEND_ETH: '0.01',
-  MAX_GAS_LIMIT: '15000000'
+  MAX_GAS_LIMIT: '15000000',
+  JOURNAL_RUN_CAP_BYTES: '1073741824',
+  BUILD_REVISION: '0d58dd8e5',
+  BUILD_IMAGE_TAG: 'midnight-crossed-books'
 }
 const READONLY = {
   CHAIN_ID: '8453',
@@ -38,11 +42,18 @@ describe('loadConfig', () => {
     expect(config.mode).toStrictEqual({
       readOnly: false,
       privateKey: KEY,
-      finality: 'safe',
-      kernel: { stateDirectory: '/state', enrollment: 'enrolled' },
-      maxFeePerGasWei: 500_000_000n,
-      maxGasLimit: 15_000_000n,
-      maxSpendWei: 10_000_000_000_000_000n
+      kernel: {
+        maxFeePerGasWei: 500_000_000n,
+        maxSpendWei: 10_000_000_000_000_000n,
+        maxGasLimit: 15_000_000n,
+        finality: 'safe',
+        stateDirectory: '/state',
+        enrollment: 'enrolled',
+        journal: {
+          build: { revision: '0d58dd8e5', imageTag: 'midnight-crossed-books' },
+          runCapBytes: 1_073_741_824
+        }
+      }
     })
   })
 
@@ -96,7 +107,12 @@ describe('loadConfig', () => {
     expect(config.minimumProfit).toBe(100n)
     expect(config.maxMatches).toBe(4)
     expect(config.mode).toEqual(
-      expect.objectContaining({ maxFeePerGasWei: 50_000_000_000n, finality: { depth: 12 } })
+      expect.objectContaining({
+        kernel: expect.objectContaining({
+          maxFeePerGasWei: 50_000_000_000n,
+          finality: { depth: 12 }
+        })
+      })
     )
   })
 
@@ -106,23 +122,6 @@ describe('loadConfig', () => {
     [{ ...WRITE, READONLY: 'treu' }, 'READONLY'],
     [{ ...WRITE, RESOLVER_PRIVATE_KEY: undefined }, 'RESOLVER_PRIVATE_KEY'],
     [{ ...WRITE, RESOLVER_PRIVATE_KEY: '0x12' }, 'RESOLVER_PRIVATE_KEY'],
-    [{ ...WRITE, FINALITY_8453: undefined }, 'FINALITY_8453'],
-    [{ ...WRITE, FINALITY_8453: 'latest' }, 'FINALITY_8453'],
-    [{ ...WRITE, KERNEL_STATE_DIR: undefined }, 'KERNEL_STATE_DIR'],
-    [{ ...WRITE, KERNEL_ENROLLMENT: undefined }, 'KERNEL_ENROLLMENT'],
-    [{ ...WRITE, KERNEL_ENROLLMENT: 'enroled' }, 'KERNEL_ENROLLMENT'],
-    [{ ...WRITE, MAX_FEE_GWEI: undefined }, 'MAX_FEE_GWEI'],
-    [{ ...WRITE, MAX_FEE_GWEI: '0' }, 'MAX_FEE_GWEI'],
-    [{ ...WRITE, MAX_FEE_GWEI: '0.0000000001' }, 'MAX_FEE_GWEI'],
-    [{ ...WRITE, MAX_FEE_GWEI: '0.000000001' }, 'cannot fund'],
-    [{ ...WRITE, MAX_SPEND_ETH: '0.0000000000000001' }, 'cannot fund'],
-    [{ ...WRITE, MAX_SPEND_ETH: undefined }, 'MAX_SPEND_ETH'],
-    [{ ...WRITE, MAX_SPEND_ETH: '0' }, 'MAX_SPEND_ETH'],
-    [{ ...WRITE, MAX_SPEND_ETH: '-1' }, 'MAX_SPEND_ETH'],
-    [{ ...WRITE, MAX_SPEND_ETH: '1e18' }, 'MAX_SPEND_ETH'],
-    [{ ...WRITE, MAX_GAS_LIMIT: undefined }, 'MAX_GAS_LIMIT'],
-    [{ ...WRITE, MAX_GAS_LIMIT: '20999' }, 'MAX_GAS_LIMIT'],
-    [{ ...WRITE, MAX_GAS_LIMIT: '0x5208' }, 'MAX_GAS_LIMIT'],
     [{ ...WRITE, RESOLVER_ADDRESS: 'not-an-address' }, 'RESOLVER_ADDRESS'],
     [{ ...WRITE, API_BASE_URL: 'not-a-url' }, 'API_BASE_URL'],
     [{ ...WRITE, ROUTER_API_BASE_URL: 'not-a-url' }, 'ROUTER_API_BASE_URL'],
@@ -140,6 +139,17 @@ describe('loadConfig', () => {
   ])('refuses invalid configuration %#, naming it', (env, message) => {
     expect(() => loadConfig(env)).toThrow(InvalidConfigurationError)
     expect(() => loadConfig(env)).toThrow(message)
+  })
+
+  test.each([
+    [{ FINALITY_8453: 'latest' }, 'FINALITY_8453'],
+    [{ KERNEL_ENROLLMENT: 'enroled' }, 'KERNEL_ENROLLMENT'],
+    [{ MAX_FEE_GWEI: '0.000000001' }, 'cannot fund'],
+    [{ MAX_SPEND_ETH: undefined }, 'MAX_SPEND_ETH'],
+    [{ MAX_GAS_LIMIT: '20999' }, 'MAX_GAS_LIMIT']
+  ])('refuses write mode with kernel settings kit refuses %#', (overrides, message) => {
+    expect(() => loadConfig({ ...WRITE, ...overrides })).toThrow(InvalidKernelSettingError)
+    expect(() => loadConfig({ ...WRITE, ...overrides })).toThrow(message)
   })
 
   test('never echoes the private key it refuses', () => {

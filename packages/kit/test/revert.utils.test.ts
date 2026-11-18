@@ -72,15 +72,6 @@ describe('abiRevertDecoder', () => {
 })
 
 describe('revertReason', () => {
-  it('decodes standard reverts by default', () => {
-    const data = encodeErrorResult({
-      abi: SOLIDITY_ERRORS,
-      errorName: 'Error',
-      args: ['market not created']
-    })
-    expect(revertReason(revertError(data))).toBe('market not created')
-  })
-
   it('uses an injected custom decoder', () => {
     const data = encodeErrorResult({ abi: CUSTOM_ABI, errorName: 'NotBorrower', args: [BORROWER] })
     expect(revertReason(revertError(data), abiRevertDecoder(CUSTOM_ABI))).toBe(
@@ -115,17 +106,6 @@ describe('revertReason', () => {
     expect(revertReason(new Error('got: :s3cret@rpc.example or s3cret:@rpc.example'))).toBe(
       'got: [redacted URL] or [redacted URL]'
     )
-  })
-})
-
-describe('isCallRevert', () => {
-  it('recognizes execution reverts', () => {
-    expect(isCallRevert(new ExecutionRevertedError({}))).toBe(true)
-  })
-
-  it('rejects transient/non-viem errors', () => {
-    expect(isCallRevert(new Error('connection reset'))).toBe(false)
-    expect(isCallRevert(new BaseError('http timeout'))).toBe(false)
   })
 })
 

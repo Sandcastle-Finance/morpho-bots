@@ -3,6 +3,7 @@ import type { JournalEntry } from '@repo/engine'
 import {
   createGraph,
   createRunner,
+  every,
   encode,
   GraphDefinitionError,
   JournalFailedError,
@@ -11,6 +12,8 @@ import {
   RunnerFinalizationError
 } from '@repo/engine'
 import { tryCatch } from '@repo/utils'
+import { once } from 'node:events'
+import { createWriteStream } from 'node:fs'
 import {
   chmod,
   mkdir,
@@ -26,7 +29,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { JournalFileSystem, JournalWritableFile } from '../src/journal-file'
+import type { JournalFileSystem, JournalRead, JournalWritableFile } from '../src/journal-file'
 
 import { InvalidJournalRunCapError, MissingBuildIdentityError } from '../src/errors'
 import {
@@ -46,10 +49,24 @@ const directory = async () => {
   return path
 }
 
+/** The file's items gathered back into one result, as an assertion wants them. */
+const read = async (path: string) => {
+  const items = await Array.fromAsync(readJournalFile(path))
+  const header = items.find(item => item.kind === 'header')?.header
+  const { kind: _kind, ...outcome } = items.at(-1) as Extract<JournalRead, { kind: 'outcome' }>
+  return {
+    ...outcome,
+    ...(header && { header }),
+    entries: items.flatMap(item => (item.kind === 'entry' ? [item.entry] : []))
+  }
+}
+
 afterEach(async () => {
   for (const path of temporary.splice(0)) await rm(path, { recursive: true, force: true })
 })
 
+/** A few reads' worth of chunks and lines: what reading may hold at once, whatever the file's size. */
+const READ_BOUND_BYTES = 4 * 1024 * 1024
 const note: JournalEntry = { kind: 'note', effect: 'guard', at: 2, note: { verdict: 'act' } }
 const build = { revision: 'abc123', imageTag: 'production' } as const
 const capacityBytes = 1_000_000
@@ -83,8 +100,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async (_path, flags) => (flags === 'r' ? folder : file),
-      readFile: async () => Buffer.of()
+      open: async (_path, flags) => (flags === 'r' ? folder : file)
     }
     const created = await createJournalFileSink(
       {
@@ -146,8 +162,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async (_path, flags) => (flags === 'r' ? folder : file),
-      readFile: async () => Buffer.concat(frames)
+      open: async (_path, flags) => (flags === 'r' ? folder : file)
     }
     const created = await createJournalFileSink(
       {
@@ -168,7 +183,9 @@ describe('a journal file', () => {
     for (const value of [1, 2, 3]) runner.push(values, value)
 
     await expect(runner.stopped).rejects.toBeInstanceOf(JournalFailedError)
-    const result = await readJournalFile(created.path, fs)
+    const copy = join(await directory(), 'copy.journal.jsonl')
+    await writeFile(copy, Buffer.concat(frames))
+    const result = await read(copy)
     expect(result.status).toBe('truncated')
     expect(result.entries).toHaveLength(1)
     expect(frames).toHaveLength(2)
@@ -190,8 +207,7 @@ describe('a journal file', () => {
       open: async (path, flags) => {
         if (flags === 'r') synced.push(path)
         return handle
-      },
-      readFile: async () => Buffer.of()
+      }
     }
     const created = await createJournalFileSink(
       {
@@ -229,7 +245,7 @@ describe('a journal file', () => {
     runner.push(values, 1)
 
     await expect(runner.stopped).rejects.toStrictEqual(new JournalOverflowError(0))
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({ status: 'truncated' })
+    await expect(read(created.path)).resolves.toMatchObject({ status: 'truncated' })
   })
 
   it('fails creation when the exclusive open exceeds the journal I/O deadline', async () => {
@@ -237,8 +253,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: () => new Promise(() => {}),
-      readFile: async () => Buffer.of()
+      open: () => new Promise(() => {})
     }
 
     await expect(
@@ -269,8 +284,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async () => file,
-      readFile: async () => Buffer.of()
+      open: async () => file
     }
 
     await expect(
@@ -302,8 +316,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async () => file,
-      readFile: async () => Buffer.of()
+      open: async () => file
     }
 
     await expect(
@@ -341,8 +354,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async (_path, flags) => (flags === 'r' ? folder : file),
-      readFile: async () => Buffer.of()
+      open: async (_path, flags) => (flags === 'r' ? folder : file)
     }
 
     await expect(
@@ -375,8 +387,7 @@ describe('a journal file', () => {
       ...noRuns,
       mkdir: async () => undefined,
       chmod: async () => undefined,
-      open: async () => file,
-      readFile: async () => Buffer.of()
+      open: async () => file
     }
     const created = await createJournalFileSink(
       {
@@ -444,7 +455,64 @@ describe('a journal file', () => {
     ).rejects.toBe(construction)
     const files = await readdir(path)
     expect(files).toStrictEqual(['7-created.journal.jsonl'])
-    await expect(readJournalFile(join(path, files[0]!))).resolves.toMatchObject({ status: 'clean' })
+    await expect(read(join(path, files[0]!))).resolves.toMatchObject({ status: 'clean' })
+  })
+
+  it('writes a failure only as a short code, whatever the bot describes it as', async () => {
+    const secret = 'https://rpc.example/v2/sk_live_secret'
+    const graph = createGraph('failing-file')
+    const values = graph.occurrences<number>('values')
+    graph.effect('leaky', {
+      requests: { value: every(values) },
+      handle: () => Promise.reject(new Error(secret))
+    })
+    const built = graph.build()
+    const created = await createJournalFileSink({
+      directory: await directory(),
+      graph: built.id,
+      build,
+      capacityBytes,
+      runCapBytes,
+      runId: 'described',
+      now: () => 1,
+      describe: error => (error instanceof Error ? error.message : String(error))
+    })
+    const runner = createRunner(built, { journal: created.journal, now: () => 1 })
+
+    runner.push(values, 1)
+
+    await expect(runner.stopped).rejects.toThrow()
+    expect((await read(created.path)).entries.at(-1)).toStrictEqual({
+      kind: 'failed',
+      origin: 'leaky',
+      at: 1,
+      description: 'undescribed'
+    })
+    expect(await readFile(created.path, 'utf8')).not.toContain('sk_live_secret')
+    expect(
+      ['rpc_down', 'a'.repeat(32), 'a'.repeat(33)].map(created.journal.describe!)
+    ).toStrictEqual(['rpc_down', 'a'.repeat(32), 'undescribed'])
+  })
+
+  it('records the run id and settings in the header it reads back', async () => {
+    const settings = { maxSpendWei: 10n ** 16n, finality: { depth: 3 }, venue: 'lifi' }
+    const created = await createJournalFileSink({
+      directory: await directory(),
+      graph: 'bot',
+      build,
+      capacityBytes,
+      runCapBytes,
+      runId: 'recorded',
+      settings,
+      now: () => 7
+    })
+    await created.finalize()
+    expect(await read(created.path)).toStrictEqual({
+      status: 'clean',
+      header: { ...created.header, run: 'recorded', settings },
+      entries: [],
+      end: { type: 'end', endedAt: 7 }
+    })
   })
 
   it('creates one exclusive 0600 file and restricts only the directories it creates', async () => {
@@ -470,7 +538,7 @@ describe('a journal file', () => {
     expect((await stat(journalDirectory)).mode & 0o777).toBe(0o700)
     expect((await stat(created.path)).mode & 0o777).toBe(0o600)
     await expect(createJournalFileSink(options)).rejects.toThrow('could not open durably')
-    expect(await readJournalFile(created.path)).toStrictEqual({
+    expect(await read(created.path)).toStrictEqual({
       status: 'clean',
       header: created.header,
       entries: [note],
@@ -512,7 +580,7 @@ describe('a journal file', () => {
         createJournalFileSink({
           directory: path,
           graph: 'bot',
-          build: invalid as never,
+          build: invalid,
           capacityBytes,
           runCapBytes,
           runId: 'rejected',
@@ -540,14 +608,14 @@ describe('a journal file', () => {
     const lines = complete.split('\n')
 
     await writeFile(created.path, `${lines[0]}\n${lines[1]}\n{"type":"end"`)
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'truncated',
       entries: [note],
       truncatedBytes: 13
     })
 
     await writeFile(created.path, `${lines[0]}\nnot-json\n`)
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 2,
       reason: 'invalid encoding'
@@ -557,7 +625,7 @@ describe('a journal file', () => {
       created.path,
       `${lines[0]}\n${encode({ type: 'end', endedAt: 1, extra: true })}\n`
     )
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 2,
       reason: 'invalid frame order or shape'
@@ -566,7 +634,7 @@ describe('a journal file', () => {
     const invalidUtf8 = Buffer.from(lines[0]!)
     invalidUtf8[invalidUtf8.indexOf('bot')] = 0xff
     await writeFile(created.path, Buffer.concat([invalidUtf8, Buffer.from('\n')]))
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 1,
       reason: 'invalid utf-8'
@@ -592,7 +660,7 @@ describe('a journal file', () => {
       Buffer.concat([Buffer.from(`${header}\n${entry}\n`), Buffer.from([0xff, 0x0a])])
     )
 
-    expect(await readJournalFile(created.path)).toStrictEqual({
+    expect(await read(created.path)).toStrictEqual({
       status: 'corrupt',
       header: created.header,
       entries: [note],
@@ -642,7 +710,7 @@ describe('a journal file', () => {
       ].join('\n')
     )
 
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 2,
       reason: 'a failed step contains a keyed delta'
@@ -687,7 +755,7 @@ describe('a journal file', () => {
       ].join('\n')
     )
 
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 2,
       reason: 'invalid keyed delta chain'
@@ -759,11 +827,66 @@ describe('a journal file', () => {
       ].join('\n')
     )
 
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({
+    await expect(read(created.path)).resolves.toMatchObject({
       status: 'corrupt',
       line: 3,
       reason: 'invalid keyed delta chain'
     })
+  })
+
+  it('reads a line that spans several reads, and numbers each entry by its line', async () => {
+    const path = await directory()
+    const created = await createJournalFileSink({
+      directory: path,
+      graph: 'bot',
+      build,
+      capacityBytes: 4_000_000,
+      runCapBytes,
+      runId: 'long-line',
+      now: () => 1
+    })
+    const long: JournalEntry = { ...note, note: { padding: 'x'.repeat(1_000_000) } }
+    await created.journal.sink.append(long)
+    await created.journal.sink.append(note)
+    await created.journal.sink.finalize()
+
+    expect(await Array.fromAsync(readJournalFile(created.path))).toStrictEqual([
+      { kind: 'header', header: created.header },
+      { kind: 'entry', line: 2, entry: long },
+      { kind: 'entry', line: 3, entry: note },
+      { kind: 'outcome', status: 'clean', end: { type: 'end', endedAt: 1 } }
+    ])
+  })
+
+  it('holds no more of a large file than one read, however far it has read', async () => {
+    const path = join(await directory(), 'large.journal.jsonl')
+    const fileBytes = 64 * 1024 * 1024
+    const line = `${encode({ type: 'entry', entry: { ...note, note: { padding: 'x'.repeat(1_000) } } })}\n`
+    const out = createWriteStream(path)
+    out.write(
+      `${encode({ type: 'header', fileFormat: 1, journalFormat: 2, graph: 'bot', run: 'large', startedAt: 1, build })}\n`
+    )
+    for (let written = 0; written < fileBytes; written += line.length)
+      if (!out.write(line)) await once(out, 'drain')
+    out.end(`${encode({ type: 'end', endedAt: 2 })}\n`)
+    await once(out, 'finish')
+    const retained = () => {
+      gc!()
+      const usage = process.memoryUsage()
+      return usage.heapUsed + usage.arrayBuffers
+    }
+    const before = retained()
+    let peak = before
+    let entries = 0
+    let last: JournalRead | undefined
+    for await (const item of readJournalFile(path)) {
+      if (item.kind === 'entry' && ++entries % 4_096 === 0) peak = Math.max(peak, retained())
+      last = item
+    }
+
+    expect(last).toMatchObject({ kind: 'outcome', status: 'clean' })
+    expect(entries).toBe(Math.ceil(fileBytes / line.length))
+    expect(peak - before).toBeLessThan(READ_BOUND_BYTES)
   })
 })
 
@@ -840,7 +963,7 @@ describe('journal retention', () => {
       [runFile(100, 'live'), runFile(20), runFile(30), runFile(40)].toSorted()
     )
     await created.finalize()
-    await expect(readJournalFile(created.path)).resolves.toMatchObject({ status: 'clean' })
+    await expect(read(created.path)).resolves.toMatchObject({ status: 'clean' })
   })
 
   it('deletes everything older than the first run that overflows the budget', async () => {
@@ -953,8 +1076,7 @@ describe('journal retention', () => {
       open: async (name, flags) => {
         calls.push(`open ${flags} ${name}`)
         return file
-      },
-      readFile: async () => Buffer.of()
+      }
     }
 
     const created = await sinkIn('/journal', 100, fs)
@@ -982,8 +1104,7 @@ describe('journal retention', () => {
       open: async name => {
         opened.push(name)
         throw new Error('unreachable')
-      },
-      readFile: async () => Buffer.of()
+      }
     }
 
     await expect(sinkIn('/journal', 100, fs)).rejects.toThrow(
@@ -1005,8 +1126,7 @@ describe('journal retention', () => {
       chmod: async () => undefined,
       open: async () => {
         throw new Error('unreachable')
-      },
-      readFile: async () => Buffer.of()
+      }
     }
 
     await expect(sinkIn(path, 100, fs)).rejects.toThrow('the journal file could not prune old runs')
@@ -1045,7 +1165,7 @@ describe('the journal run cap', () => {
     await capped.finalize()
 
     expect((await stat(capped.path)).size).toBeGreaterThan(header + 2 * frame)
-    await expect(readJournalFile(capped.path)).resolves.toMatchObject({
+    await expect(read(capped.path)).resolves.toMatchObject({
       status: 'clean',
       entries: [note, note, note]
     })

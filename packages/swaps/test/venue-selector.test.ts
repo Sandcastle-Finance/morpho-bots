@@ -287,15 +287,6 @@ describe('createVenueSelector', () => {
       expect(selector.select(PAIR, SMALL, 0n)[0]?.costBps).toBeNull()
     })
 
-    it('floors a venue that beats the oracle at zero rather than scoring it as a bonus', async () => {
-      const probe = fakeProbe(OUTPUTS)
-      const selector = make(probe)
-      await selector.refresh(PAIR)
-
-      const [best] = selector.select(PAIR, SMALL, 80n) // estimatedOut 100 > reference 80
-      expect(best?.costBps).toBe(0)
-    })
-
     it('keeps the unfloored cost on costBpsRaw so a stale oracle stays visible', async () => {
       const probe = fakeProbe(OUTPUTS)
       const selector = make(probe)

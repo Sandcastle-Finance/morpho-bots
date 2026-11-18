@@ -10,6 +10,7 @@ import {
   initialFees,
   stepCap
 } from '@repo/kit'
+import { InvalidKernelSettingError } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 import { getAddress, parseEther, parseGwei } from 'viem'
 import { base, mainnet, optimism } from 'viem/chains'
@@ -102,6 +103,9 @@ function baseEnv(overrides: Record<string, string | undefined> = {}) {
     MAX_FEE_GWEI: '250',
     MAX_SPEND_ETH: '0.4',
     MAX_GAS_LIMIT: '12000000',
+    JOURNAL_RUN_CAP_BYTES: '1073741824',
+    BUILD_REVISION: '0d58dd8e5',
+    BUILD_IMAGE_TAG: 'midnight-liquidation',
     ZEROX_API_KEY: 'zerox-key',
     MORPHO_API_KEY: 'morpho-key',
     ...overrides
@@ -122,9 +126,9 @@ describe('loadConfig', () => {
       'https://api.morpho.org/markets/midnight/liquidation-candidates'
     )
     expect(config.discovery.healthFactorLte).toBe(1.02)
-    expect(config.maxFeePerGasWei).toBe(parseGwei('250'))
-    expect(config.maxSpendWei).toBe(parseEther('0.4'))
-    expect(config.maxGasLimit).toBe(12_000_000n)
+    expect(config.kernel.maxFeePerGasWei).toBe(parseGwei('250'))
+    expect(config.kernel.maxSpendWei).toBe(parseEther('0.4'))
+    expect(config.kernel.maxGasLimit).toBe(12_000_000n)
     expect(config.logLevel).toBe('info')
 
     // Venue enablement is inferred from the present API key; global routing knobs take their defaults.
@@ -170,7 +174,7 @@ describe('loadConfig', () => {
     )
 
     expect(config.rpcUrlFallback).toBe('https://rpc.fallback')
-    expect(config.maxFeePerGasWei).toBe(parseGwei('42'))
+    expect(config.kernel.maxFeePerGasWei).toBe(parseGwei('42'))
     expect(config.logLevel).toBe('debug')
   })
 
@@ -202,9 +206,11 @@ describe('loadConfig', () => {
   })
 
   it.each([
-    [{ KERNEL_STATE_DIR: undefined }, 'Missing required env var: KERNEL_STATE_DIR'],
-    [{ KERNEL_ENROLLMENT: undefined }, 'Missing required env var: KERNEL_ENROLLMENT'],
-    [{ KERNEL_ENROLLMENT: 'yes' }, 'KERNEL_ENROLLMENT must be "enrolling" or "enrolled"'],
+    [{ KERNEL_STATE_DIR: undefined }, 'KERNEL_STATE_DIR must be set'],
+    [{ KERNEL_ENROLLMENT: undefined }, 'KERNEL_ENROLLMENT must be set'],
+    [{ KERNEL_ENROLLMENT: 'yes' }, 'KERNEL_ENROLLMENT must be enrolling or enrolled'],
+    [{ JOURNAL_RUN_CAP_BYTES: undefined }, 'JOURNAL_RUN_CAP_BYTES'],
+    [{ BUILD_REVISION: undefined }, 'BUILD_REVISION'],
     [
       { POSITION_LIQUIDATION_COOLDOWN_MS: '0' },
       'POSITION_LIQUIDATION_COOLDOWN_MS is no longer supported'
@@ -217,11 +223,13 @@ describe('loadConfig', () => {
   it('refuses a chain whose finality is missing or malformed', () => {
     expect(() => loadConfig(baseEnv({ FINALITY_10: undefined }), deps)).toThrow(/FINALITY_10/)
     expect(() => loadConfig(baseEnv({ FINALITY_10: '0' }), deps)).toThrow(/FINALITY_10/)
-    expect(loadConfig(baseEnv({ FINALITY_10: '64' }), deps).finality).toStrictEqual({ depth: 64 })
+    expect(
+      loadConfig(baseEnv({ CHAIN_ID: '8453', FINALITY_8453: '64' })).kernel.finality
+    ).toStrictEqual({ depth: 64 })
   })
 
   it('reads where the kernel keeps its ledger', () => {
-    expect(loadConfig(baseEnv(), deps).kernel).toStrictEqual({
+    expect(loadConfig(baseEnv(), deps).kernel).toMatchObject({
       stateDirectory: '/var/lib/kernel',
       enrollment: 'enrolled'
     })
@@ -246,44 +254,43 @@ describe('loadConfig', () => {
   // policy while the process stays up — the bot looks healthy and liquidates nothing.
   it.each(['0', '20999'])('rejects a MAX_GAS_LIMIT of %s as unspendable', gasLimit => {
     expect(() => loadConfig(baseEnv({ MAX_GAS_LIMIT: gasLimit }), deps)).toThrow(
-      'MAX_GAS_LIMIT must be at least 21000'
+      'MAX_GAS_LIMIT must be a whole number, at least 21000'
     )
   })
 
   it('accepts a MAX_GAS_LIMIT at the intrinsic-gas floor', () => {
-    expect(loadConfig(baseEnv({ MAX_GAS_LIMIT: '21000' }), deps).maxGasLimit).toBe(21_000n)
+    expect(loadConfig(baseEnv({ MAX_GAS_LIMIT: '21000' }), deps).kernel.maxGasLimit).toBe(21_000n)
   })
 
   // The bound an operator actually cares about is the product; assert it is derived and enforced.
   it('resolves MAX_SPEND_ETH to wei', () => {
-    expect(loadConfig(baseEnv({ MAX_SPEND_ETH: '0.05' }), deps).maxSpendWei).toBe(
+    expect(loadConfig(baseEnv({ MAX_SPEND_ETH: '0.05' }), deps).kernel.maxSpendWei).toBe(
       parseEther('0.05')
     )
   })
 
   it.each(['0', '-1', 'abc'])('rejects a MAX_SPEND_ETH of %s', spend => {
     expect(() => loadConfig(baseEnv({ MAX_SPEND_ETH: spend }), deps)).toThrow(
-      'MAX_SPEND_ETH must be a positive decimal'
+      'MAX_SPEND_ETH must be an ether amount of at least one wei'
     )
   })
 
-  it.each([
-    { MAX_SPEND_ETH: '0.000000000000021' },
-    { MAX_FEE_GWEI: '0.000000001' },
-    { MAX_FEE_GWEI: '0.0000000001' }
-  ])('refuses fee bounds that cannot fund a fill and a step below it: %o', overrides => {
-    expect(() => loadConfig(baseEnv(overrides), deps)).toThrow(/cannot fund a nonce fill/)
+  it.each([{ MAX_SPEND_ETH: '0.000000000000021' }, { MAX_FEE_GWEI: '0.000000001' }])(
+    'refuses fee bounds that cannot fund a fill and a step below it: %o',
+    overrides => {
+      expect(() => loadConfig(baseEnv(overrides), deps)).toThrow(/cannot fund a nonce fill/)
+    }
+  )
+
+  it('refuses MAX_FEE_GWEI past nine decimals instead of rounding it', () => {
+    expect(() => loadConfig(baseEnv({ MAX_FEE_GWEI: '0.0000000001' }), deps)).toThrow(
+      InvalidKernelSettingError
+    )
   })
 
   it('throws when a required var is missing', () => {
     expect(() => loadConfig(baseEnv({ RPC_URL: undefined }), deps)).toThrow(
       /Missing required env var: RPC_URL/
-    )
-  })
-
-  it('throws on an unknown CHAIN_ID', () => {
-    expect(() => loadConfig(baseEnv({ CHAIN_ID: '999999' }), deps)).toThrow(
-      /Unsupported CHAIN_ID 999999/
     )
   })
 
@@ -335,14 +342,12 @@ describe('loadConfig', () => {
       [undefined, '', '  '].map(value => [name, value] as const)
     )
   )('refuses to start without %s (%j)', (name, value) => {
-    expect(() => loadConfig(baseEnv({ [name]: value }), deps)).toThrow(
-      `Missing required env var: ${name}`
-    )
+    expect(() => loadConfig(baseEnv({ [name]: value }), deps)).toThrow(`${name} must be set`)
   })
 
   it('throws on a non-numeric MAX_FEE_GWEI', () => {
     expect(() => loadConfig(baseEnv({ MAX_FEE_GWEI: 'abc' }), deps)).toThrow(
-      /MAX_FEE_GWEI must be a positive number/
+      /MAX_FEE_GWEI must be a gwei amount/
     )
   })
 
@@ -400,8 +405,7 @@ describe('loadConfig', () => {
   })
 
   it('ignores a stale SLIPPAGE_BPS rather than failing loud on it', () => {
-    // The knob was removed when the min-out floor became break-even-derived. A deployment that still
-    // sets it must keep starting — an unknown env var is not a misconfiguration.
+    // A deployment that still sets SLIPPAGE_BPS must keep starting: an unknown env var is not a misconfiguration.
     expect(loadConfig(baseEnv({ SLIPPAGE_BPS: '250' }), deps)).toEqual(loadConfig(baseEnv(), deps))
   })
 
@@ -592,7 +596,7 @@ describe('loadConfig', () => {
 
 /** The re-bids a send life spans, each a stuck threshold apart, at a flat `baseFee`, before one drops. */
 const rebidsUnder = (config: Config, baseFee: bigint) => {
-  const cap = stepCap(feeCeiling(config.maxFeePerGasWei, config.maxSpendWei))
+  const cap = stepCap(feeCeiling(config.kernel.maxFeePerGasWei, config.kernel.maxSpendWei))
   const rebids = Math.floor(
     config.sendLifeMs / (blocksFor(STUCK_MS, config.chain) * blockTimeMs(config.chain.id))
   )

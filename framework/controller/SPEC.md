@@ -8,8 +8,8 @@ bot's key is used only through its kernel".
   on `@repo/engine`, and pure constructors of what `@repo/kernel` takes. Where the prose and the
   code disagree, the code is wrong or the prose is. Either way it is a bug in this spec.
 - [`test/`](./test) holds the scenario tests (§15).
-- Run them with `pnpm --filter @repo/controller run test` and
-  `pnpm --filter @repo/controller run typecheck`.
+- Run them with `bun run --cwd framework/controller test` and
+  `bun run --cwd framework/controller typecheck`.
 
 The controller is a library over the kernel, not a layer between the bot and it. It builds the
 plans and advances the kernel admits, decides which key is prepared and submitted next, and keeps
@@ -149,6 +149,15 @@ the effect its stage continues.
 `isBusy(view, key)` reads `busy`, and is false with no view ("holds a key busy on every entry that
 carries risk, revoking and adopted ones included" reads it through `isBusy`; no view is untested).
 
+`declareHealth(g, id, state, { chainId })` is a map over the kernel's state for operators;
+`defineBot` declares it as `kernel.health`, apart from the view so no task family is woken by it.
+It holds `chainId`, the lifecycle's kind, a stop's `outcome`, `acceptingNewWork`,
+`numReservations` and `pendingAtCeiling` as the view counts them, `unresolvedNonces`,
+`oldestPendingSince` (when the oldest unresolved nonce record was opened), `waitingMaxFeePerGas`,
+`chainNonce` and `nextNonce`. It holds instants, never ages, so it is written when health changes
+and not at every tick, and never the lifecycle's `reason`, which is free text ("gives a kernel
+health of instants and statuses, never an age or a reason").
+
 ## 4. Backoff
 
 `declareBackoff(g, id, { runId, prepared, submitted, activity, heads, policy })` is the fold `id` with the
@@ -205,9 +214,10 @@ contract (`docs/CONVENTIONS.md`), so none is pinned (untested).
 
 `tasks.each(b, id, { kernel, candidates, facts, inputs, runId, maxReservations, backoff, policy,
 prepare })` declares, in the scope `id`: `${id}.requests`, which the kernel takes; `${id}.prepared`;
-the backoff fold `${id}.backoff` (§4); the family fold `id` with `${id}.prepare` and `${id}.events`;
-and the preparation effect `${id}.preparation`. It returns `state`, `events`, `backoff`, `requests`
-and `prepared` (untested). `facts` is one fact node or a list of them, each read at the family's
+the backoff fold `${id}.backoff` (§4); the family fold `id` with `${id}.prepare`, `${id}.events` and
+`${id}.wanted`; the preparation effect `${id}.preparation`; and the projection map
+`${id}.projection` with the phase fold `${id}.phase` (§5.9).
+It returns `state`, `events`, `backoff`, `requests`, `prepared` and `phase` (untested). `facts` is one fact node or a list of them, each read at the family's
 key; every act rests on all of them, so "its fact" below means each of its facts, and "its
 reading" the reading of each ("rests on both, based at the chain fact, and holds until the earlier
 expiry").
@@ -225,7 +235,8 @@ The family fold watches `candidates`, `facts`, `inputs`, the kernel view and the
 takes every `prepared` answer and every batch of kernel activity. Each evaluation first applies every
 input delivered to it, then decides once, at the step's time:
 
-1. Every present candidate's `policy(candidate, key)` is read, once per decision (§5.2) (untested).
+1. Every present candidate's `policy(candidate, key)` is read, once per decision (§5.2) ("reads the
+   policy once per decision, and shows the answer that decision read").
 2. Every ready act is checked against `heldDrop` and dropped on the first reason that holds (§5.5)
    ("drops a prepared act it was holding, and submits only a fresh one"; "drops the old ready act
    and submits only a preparation of the new task"; the order of the reasons is untested).
@@ -236,6 +247,9 @@ input delivered to it, then decides once, at the step's time:
 4. Declines and stale holds whose fingerprints no longer match the current inputs are forgotten
    (§5.6) ("is prepared again when only its input changes, and not when nothing does"; "is prepared
    again on the next read of its fact, not before, and backs nothing off").
+5. Every policy result of step 1 is emitted, as one record by key, to `${id}.wanted`, after every
+   other emit of the decision. It is the decision's only output beyond its state, requests,
+   preparations and events, and changes none of them (review).
 
 Rank order is priority descending; among equal priorities, keys in string order starting after the
 key served last, so equal priorities take turns ("prepares and submits by priority, resting each
@@ -274,6 +288,10 @@ after a failed read"; "is prepared again when only its input changes, and not wh
 prepared until its fact is read at or after that effect"; "keep independent backoff: a task backed
 off never holds the other"; a busy key, an outstanding or ready act, and an absent key are
 untested).
+
+While accepting work, every present task's reading is taken before any of these holds is checked,
+so a malformed basis (§2.2) fails the decision whatever holds its key ("fails the decision on a
+malformed reading of a key that a ticket holds").
 
 Then, in rank order, a preparation is asked for while the number outstanding is below the lane's
 concurrency and `numReservations + outstanding + ready` is below `maxReservations`, where
@@ -314,9 +332,10 @@ answer to a live ticket makes the key ready. An `ok: false` answer with `backoff
 ticket is a decline (§5.6). An answer to a voided ticket frees the key's slot in the family and
 readies nothing; a fault answer still logs and backs off (§4), since those read every answer.
 
-The runtime answers for a handler that throws, as `prepare_threw` with `error` the thrown value's
-class name and never its message or `name` ("backs off a key whose handler throws, naming only the
-error, and runs on"), and for one still running at `timeoutMs`, as `prepare_timed_out`; both carry
+The runtime answers for a handler that throws, as `prepare_threw`, and reads nothing from the thrown
+value, as the kernel's halt reason does not (kernel SPEC §13.1) ("backs off a key whose handler throws,
+logging only its reason, and runs on"), and for one still running at `timeoutMs`, as
+`prepare_timed_out`; both carry
 `backoff: true` and log `act.prepare_failed`; a timeout also aborts the handler's `signal`, a throw
 does not. The runtime stops
 waiting at the timeout whether or not the handler heeds the signal, so a hung handler holds its lane
@@ -386,6 +405,63 @@ runtime waits for the next read at or after that block instead of submitting and
 `prepare_failed` and info otherwise. Log shapes are not a contract (`docs/CONVENTIONS.md`), so none
 is pinned (untested).
 
+### 5.9 Phase
+
+`${id}.projection` is a map over a `sample` of the family's state and `every` write of
+`${id}.wanted`. Each evaluation projects the latest decision delivered to it: the family's state,
+the policy results that decision read and its time. When a step settles, it reflects the family's
+last decision of the step. It never reads the policy itself ("reads the policy once per decision,
+and shows the answer that decision read"; "shows the last decision of a step in which the family
+decided twice"). A projection that throws or is not data reads as `projection_threw` or
+`not_data`, and never fails the graph ("fails only its own coverage, coded, when the projection
+throws"; "fails only its own coverage, never the graph, on a busy key
+that is no data field").
+
+`${id}.phase` is a fold over `watch` of the projection and its own previous value, which is
+`UNREAD` before the first decision. Its value is a complete `Keyed` with one present key, at basis
+`null`, for every key the policy returned for, that has an act or a ticket, or that the view holds
+busy. A key whose phase is unchanged keeps its previous record ("keeps the record of a key whose
+phase a decision leaves unchanged, and replaces a changed one"). A failed projection gives no keys, with
+coverage `failed` and its code as the reason ("fails only its own coverage, coded, when the
+projection throws").
+
+A key's phase comes from the same check §5.3 admits preparations by, and the details of `ready` and
+`eligible` from the same checks §5.3 submits and asks by, so the phase holds whatever those rules
+hold ("holds each key in the phase its own rules hold it in, then acts as it said"; "names the
+first slot rule an eligible key waits on"). A hold that ends by time alone, with no wake, moves at
+the family's next decision ("moves a hold that ends by time alone at the next decision, as the
+family drops it"); one that ends at a fact's expiry moves at that wake, though the family's state
+is unchanged ("moves to waiting at the step a fact expires, though the family's state is
+unchanged"). The phase is the first that holds, in this order:
+
+| Phase        | When                                                                                 | Fields                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `submitted`  | an act of the family's awaits its first notice (§5.4)                                |                                                                                           |
+| `ready`      | an act is prepared and held                                                          | `detail`: the first of `not_accepting`, `reservations_full`, `busy`, `backed_off` to hold |
+| `preparing`  | a ticket is outstanding                                                              | `detail`: `void` for a voided ticket (§5.2)                                               |
+| `in_flight`  | the view holds the key busy (§3)                                                     |                                                                                           |
+| `rejected`   | its policy return was refused (§5.2)                                                 | `detail`: `policy_threw` or `policy_invalid`                                              |
+| `waiting`    | a fact is not present, a fact is expired, its input is not present, or §5.7 holds it | `detail`: `fact_unavailable`, `fact_expired`, `input_unavailable`, `predates_own_effect`  |
+| `declined`   | declined on these inputs (§5.6)                                                      |                                                                                           |
+| `stale`      | held stale on this reading (§5.6)                                                    |                                                                                           |
+| `backed_off` | its task or the key's untasked slot is backed off (§4)                               | `until` and `failures` of the wait that ends later                                        |
+| `eligible`   | none of the above: §5.3 would prepare it but for a slot                              | `detail`: the first of `not_accepting`, `lane_full`, `reservations_full` to hold          |
+
+Each key also holds its `task`, the act's or else the policy's, and the `priority` the policy
+returned at the decision, whatever an act was sent at. Every field is a task name, a priority, a
+block, a count or a code: nothing of a ready act's steps, a preparation's input or a handler's error
+reaches it, so a reader may log it whole ("holds each key in the phase its own rules hold it in,
+then acts as it said" pins each key's fields).
+
+`declarePhase(g, reads, project, fields)` declares this pair for any caller, not only a task family:
+`projection`, a map of `project` over `reads`, and `phase`, the fold above, compared on `fields`,
+both in `g`'s scope, so a caller in scope `s` gets `${s}.projection` and `${s}.phase`. The phase is
+`UNREAD` until the projection first evaluates. A bot with no task family, such as the quoter, passes
+its own reads, projection and fields; this section's table binds only a family, while the rules for
+a failed projection and an unchanged key hold for any caller ("fails only its own coverage, coded,
+when the projection throws"; "keeps the record of a key whose phase a decision leaves unchanged, and
+replaces a changed one").
+
 ## 6. Tasks of one key
 
 A key's backoff, declines and stale holds are kept per task, its intent ids carry the task, and it
@@ -417,7 +493,8 @@ acted on once: its own admission never moves its evidence").
 it. Every helper but `raw` declares plain engine nodes under the ids below, so anything it does can
 be written raw instead (review).
 
-- `b.kernel(options)` is `declareKernelHost` plus the view `kernel.view`. It is declared once; a
+- `b.kernel(options)` is `declareKernelHost` plus the view `kernel.view` and the health
+  `kernel.health` (§3). It is declared once; a
   second is refused. Its `requests` option names the nodes besides the task family's that write the
   kernel ("takes the requests b.kernel was given beside the family"). Once the declaration returns,
   the kernel is attached over the family's requests, those nodes, and the domain's sealed facts

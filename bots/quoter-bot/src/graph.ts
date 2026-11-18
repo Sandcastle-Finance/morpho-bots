@@ -12,9 +12,10 @@ import type {
   Stream
 } from '@repo/engine'
 import type { KernelHostOptions, KernelRequest, KernelState } from '@repo/kernel'
+import type { Logger } from '@repo/kit'
 import type { Hex } from 'viem'
 
-import { declareHaltPolicy, declareWorkflow, kernelDomain } from '@repo/controller'
+import { declareHaltPolicy, declareHealth, declareWorkflow, kernelDomain } from '@repo/controller'
 import {
   digestOf,
   emitTo,
@@ -28,6 +29,7 @@ import {
   watch
 } from '@repo/engine'
 import { declareKernel } from '@repo/kernel'
+import { declareLiveLog } from '@repo/kit'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import type { Observed, Prepared } from './application/engine/decision'
@@ -57,6 +59,7 @@ import {
 import { advanceCrossings } from './application/engine/ladder-decision'
 import { decideMarket, marketReading, prepareRequest } from './application/engine/market-decision'
 import { marketKey } from './application/engine/readings'
+import { redemptionOf } from './application/engine/redemption'
 import { operatorErrorName } from './application/monitoring/operator-error-name.utils'
 import { readinessVerdict } from './application/setup/setup-check.utils'
 import { declareActs } from './infrastructure/engine/quoter-acts'
@@ -80,6 +83,7 @@ const PREPARE_LANE = { concurrency: 4, queue: 256 }
  * answered with this instead; its own late answer is never written.
  */
 const PREPARATION_TIMED_OUT: PrepareAnswer = { ok: false, errorName: 'TimeoutError' }
+const UNSHIPPED: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
 /** How many polls a reference may lag the world it is decided beside before it reads as stale. */
 const REFERENCE_POLLS = 3
 
@@ -114,6 +118,14 @@ type QuoterGraphOptions = Readonly<{
   ladder: readonly ValidLadderConfig[]
   bootstrap: readonly ValidBootstrapConfig[]
   accounting: WorldAccounting
+  /**
+   * Whether a market whose maker credit is withdrawable redeems it at par before it quotes. A
+   * market redeems only while none of its other acts is in flight, so a workflow under way keeps
+   * the preparation it advances on; a redemption that does not settle is held until the next poll,
+   * so the market quotes meanwhile; a dry run holds each market after its first logged redemption,
+   * which never moves its credit.
+   */
+  redeemWithdrawable: boolean
   signing: QuoterSigning
   kernel: QuoterHosting
   /** Whether the kernel's world signs and sends nothing, so an act reports as logged. */
@@ -140,6 +152,8 @@ type QuoterGraphOptions = Readonly<{
   onSetup?: (reading: SetupReading) => void
   onEvent?: (event: ActEvent) => void
   onAdvance?: (event: WorkflowEvent) => void
+  /** Where the live log writes its `live.*` lines; without one, they are written nowhere. */
+  liveLogger?: Logger
 }>
 
 const workflowOf = (key: string) => key.split(':') as [Workflow, Hex]
@@ -285,9 +299,10 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
   const referenceWrites = g.node<KeyedWrite<ReferenceReading>>('references.reads')
   const references = keyedLevel(g, 'references', referenceWrites)
   const prepareResults = g.node<PrepareResult>('quoter.prepared.results')
+  const noAnswers: Readonly<Record<string, PrepareResult>> = {}
   const prepared = g.fold('quoter.prepared', {
     reads: { result: every(prepareResults) },
-    initial: {} as Readonly<Record<string, PrepareResult>>,
+    initial: noAnswers,
     applyInput: (answers, { value }) =>
       (answers[value.key]?.seq ?? -1) > value.seq
         ? { state: answers }
@@ -301,9 +316,10 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
   const reports = g.node<QuoterReport>('quoter.reports')
   const events = g.node<ActEvent>('quoter.acts.events')
 
+  const noCrossings: Readonly<Record<string, LadderCrossings>> = {}
   const crossings = g.fold('ladder.crossings', {
     reads: { event: every(events) },
-    initial: {} as Readonly<Record<string, LadderCrossings>>,
+    initial: noCrossings,
     applyInput: (state, { value }) => {
       if (value.type !== 'ended' || value.outcome.notice !== 'settled') return { state }
       if (value.outcome.kind !== 'replace' || !value.key.startsWith('ladder:')) return { state }
@@ -322,12 +338,44 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
         : { state }
   })
 
+  const noHolds: Readonly<{
+    unsettled: readonly string[]
+    logged: readonly string[]
+    flying: Readonly<Record<string, string>>
+  }> = { unsettled: [], logged: [], flying: {} }
+  const redemptionHolds = g.fold('markets.redemption.holds', {
+    reads: { event: every(events), tick: every(poll) },
+    initial: noHolds,
+    applyInput: (holds, input) => {
+      if (input.from === 'tick') return { state: { ...holds, unsettled: [] } }
+      const { value } = input
+      if (value.type === 'submitted')
+        return value.act.kind === 'redeem'
+          ? { state: holds }
+          : { state: { ...holds, flying: { ...holds.flying, [value.intentId]: value.key } } }
+      if (value.type !== 'ended') return { state: holds }
+      const { [value.outcome.intentId]: _landed, ...flying } = holds.flying
+      const add = (keys: readonly string[]) =>
+        keys.includes(value.key) ? keys : [...keys, value.key]
+      if (value.outcome.kind !== 'redeem') return { state: { ...holds, flying } }
+      if (value.outcome.notice !== 'settled')
+        return { state: { ...holds, flying, unsettled: add(holds.unsettled) } }
+      return { state: { ...holds, flying, logged: options.dry ? add(holds.logged) : holds.logged } }
+    }
+  })
+  const redeemsNow = (holds: MapInputs<typeof decisionInputs>['redemptionHolds'], key: string) =>
+    holds === undefined ||
+    (!holds.unsettled.includes(key) &&
+      !holds.logged.includes(key) &&
+      !Object.values(holds.flying).includes(key))
+
   const decisionInputs = {
     requested: latest(requested),
     references: latest(references),
     prepared: latest(prepared),
     crossings: sample(crossings),
-    completed: sample(completed)
+    completed: sample(completed),
+    redemptionHolds: sample(redemptionHolds)
   }
   const decide = (
     value: WorldValue,
@@ -342,11 +390,16 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
       options.accounting,
       (inputs.completed ?? []).includes(config.marketId)
     )
+    const redemption =
+      options.redeemWithdrawable && redeemsNow(inputs.redemptionHolds, key)
+        ? redemptionOf(value.positions[config.marketId])
+        : undefined
     const context = {
       reference: referenceOf(inputs.references, key, basis.readAt, maxReferenceAgeMs),
       view: value.view,
       crossings: inputs.crossings?.[key] ?? {},
-      completed: (inputs.completed ?? []).includes(config.marketId)
+      completed: (inputs.completed ?? []).includes(config.marketId),
+      ...(redemption && { redemption })
     }
     const params = prepareRequest(reading, config, context)
     const digest =
@@ -627,6 +680,16 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
     }
   })
 
+  const health = declareHealth(g, 'kernel.health', kernel.nodes.state, {
+    chainId: hosting.config.chainId
+  })
+  const live = declareLiveLog(g, {
+    on: kernel.nodes.tick,
+    show: [{ node: acts.phase, label: 'phase' }, health],
+    run: options.runId,
+    logger: options.liveLogger ?? UNSHIPPED
+  })
+
   return {
     kernel,
     domain,
@@ -638,6 +701,8 @@ export const declareQuoter = (g: GraphBuilder, options: QuoterGraphOptions) => {
     desires,
     acts,
     reports,
-    events
+    events,
+    health,
+    live
   }
 }

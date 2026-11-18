@@ -4,7 +4,8 @@ import type { ReportCommand } from '@repo/kernel'
 import { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS } from '@repo/engine'
 import { tryCatch } from '@repo/utils'
 
-import type { LiquidatorOptions } from './graph'
+import type { LiquidatorDeps } from './graph'
+import type { LiquidatorSettings } from './settings'
 
 import { declareLiquidator } from './graph'
 
@@ -14,7 +15,8 @@ import { declareLiquidator } from './graph'
  * @param journal - The run's journal; it is finalized if the graph or the runner cannot be created.
  */
 export const startLiquidator = async (
-  options: LiquidatorOptions & {
+  settings: LiquidatorSettings,
+  options: LiquidatorDeps & {
     now?: () => number
     journal: NonNullable<RunnerOptions['journal']>
   }
@@ -22,14 +24,11 @@ export const startLiquidator = async (
   const now = options.now ?? Date.now
   const { journal } = options
   let runner: Runner
-  let nodes: Omit<ReturnType<typeof declareLiquidator>, 'graph'>
+  let declared: ReturnType<typeof declareLiquidator>
   try {
-    const { graph, ...declared } = declareLiquidator({
-      ...options,
-      kernel: { ...options.kernel, now }
-    })
-    nodes = declared
-    runner = createRunner(graph, { now, journal })
+    declared = declareLiquidator(settings, { ...options, kernel: { ...options.kernel, now } })
+    declared.live.describe(declared.graph)
+    runner = createRunner(declared.graph, { now, journal, observe: declared.live.observe })
   } catch (error) {
     const finalized = await tryCatch(
       journal.sink.finalize(
@@ -44,6 +43,7 @@ export const startLiquidator = async (
         )
       : error
   }
+  const { graph, ...nodes } = declared
   try {
     await nodes.kernel.start(runner)
   } catch (error) {
@@ -56,9 +56,11 @@ export const startLiquidator = async (
       : error
   }
   return {
+    graph,
     runner,
     nodes,
     stop: () => runner.push(nodes.kernel.nodes.requests, { type: 'Stop' }),
-    stopped: runner.stopped as Promise<ReportCommand>
+    stopped: runner.stopped as Promise<ReportCommand>,
+    live: nodes.live
   }
 }

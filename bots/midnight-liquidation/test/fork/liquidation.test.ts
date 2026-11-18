@@ -7,9 +7,7 @@ import {
   createDeploylessClient,
   createJournalFileSink,
   createLogger,
-  readJournalFile,
-  simulateLiquidationExec,
-  TRANSACTION_KERNEL_RESERVATIONS
+  simulateLiquidationExec
 } from '@repo/kit'
 import { createRateLimitedClient, quoteUniswapV3 } from '@repo/swaps'
 import { lensKey } from '@repo/utils'
@@ -28,21 +26,18 @@ import type { ForkHandle, TestClient } from './harness'
 import type { SeededPosition } from './seed'
 
 import { loadConfig } from '../../src/config'
-import {
-  LISTED_MARKETS_MAX_AGE_MS,
-  TIME_TO_MAX_LIF,
-  TOKEN_PRICES_REFRESH_MS,
-  TOKEN_PRICES_VALID_MS
-} from '../../src/constants'
-import { encodeLiquidationExec } from '../../src/execution/encode-call'
+import { TIME_TO_MAX_LIF } from '../../src/constants'
 import { expectedLoanOut } from '../../src/execution/swap-step'
-import { liquidatorAccount, liquidatorKernel } from '../../src/kernel'
+import { LIQUIDATOR_GRAPH } from '../../src/graph'
+import { chainFeeReads, liquidatorAccount, liquidatorKernel } from '../../src/kernel'
 import { composeQuoting } from '../../src/quotes'
 import { startLiquidator } from '../../src/run'
 import { isLiquidatable } from '../../src/runner/eligibility'
 import { createPlanSkipLog } from '../../src/runner/plan-skip-log'
+import { liquidatorSettings } from '../../src/settings'
 import { readMidnightLiquidationLens } from '../../src/state/lens.sol'
 import { createTickStats } from '../../src/stats'
+import { replayFile } from '../scenario/bot'
 import {
   deployExecutor,
   FORK_URL,
@@ -125,6 +120,9 @@ describe.skipIf(!FORK_URL)('fork: end-to-end liquidation of seeded Base Midnight
       EXECUTOOOR_ADDRESS: executooor,
       KERNEL_STATE_DIR: stateDirectory,
       KERNEL_ENROLLMENT: 'enrolling',
+      JOURNAL_RUN_CAP_BYTES: '1073741824',
+      BUILD_REVISION: '0d58dd8e5',
+      BUILD_IMAGE_TAG: 'test',
       MAX_FEE_GWEI,
       MAX_SPEND_ETH,
       MAX_GAS_LIMIT,
@@ -215,17 +213,24 @@ describe.skipIf(!FORK_URL)('fork: end-to-end liquidation of seeded Base Midnight
       { source: 'fork', ids: [position.id.toLowerCase()], updatedAt: Date.now() }
     ]
 
-    const kernel = liquidatorKernel({ config, account, logger })
-    const journal = await createJournalFileSink({
+    const settings = {
+      ...liquidatorSettings(config, { account: eoa, runId: runIdAt(Date.now()) }),
+      venue: { concurrency: 1 },
+      backoff: { baseBlocks: 1, maxBlocks: 4 }
+    }
+    const kernel = liquidatorKernel(settings, { config, account, logger })
+    const created = await createJournalFileSink({
       directory: join(stateDirectory, 'journal'),
-      graph: 'midnight-liquidation',
+      graph: LIQUIDATOR_GRAPH,
       build: { revision: 'f0f0f0', imageTag: 'fork-test' },
       capacityBytes: JOURNAL_CAPACITY_BYTES,
-      runCapBytes: JOURNAL_RUN_CAP_BYTES
+      runCapBytes: JOURNAL_RUN_CAP_BYTES,
+      runId: settings.runId,
+      settings
     })
     const loanBefore = await balanceOf(USDC, eoa)
-    const bot = await startLiquidator({
-      journal: journal.journal,
+    const bot = await startLiquidator(settings, {
+      journal: created.journal,
       kernel: kernel.live,
       world: {
         discover: async () => ({
@@ -233,63 +238,15 @@ describe.skipIf(!FORK_URL)('fork: end-to-end liquidation of seeded Base Midnight
           complete: true
         }),
         readLens: (pairs, at) =>
-          readMidnightLiquidationLens(client, MIDNIGHT, pairs, at.hash as Hex),
-        caller: executooor
+          readMidnightLiquidationLens(client, MIDNIGHT, pairs, at.hash as Hex)
       },
-      worldValidMs: config.worldValidMs,
-      prepare: {
-        executor: executooor,
-        minSurplusBps: config.quoting.minSurplusBps,
-        quoteFor,
-        encode: (market, borrower, plan, swapPlan) =>
-          encodeLiquidationExec({
-            executor: executooor,
-            midnight: MIDNIGHT,
-            market,
-            collateralIndex: plan.collateralIndex,
-            seizedAssets: plan.seizedAssets,
-            repaidUnits: plan.repaidUnits,
-            borrower,
-            postMaturityMode: plan.postMaturityMode,
-            plan: swapPlan,
-            recipient: eoa
-          }),
-        simulate: data => simulateLiquidationExec(client, { executooor, eoa, data }),
-        feesFor: async () => ({
-          l1Data: 0n,
-          baseFee: 0n,
-          gasLimit: 0n,
-          firstBid: () => ({ maxFeePerGas: 0n, gas: 0n })
-        }),
-        nativeToken: config.wrappedNative,
-        validForMs: config.sendLifeMs,
-        now: Date.now
-      },
-      sizing: {
-        seizeCapMarginBps: config.quoting.seizeCapMarginBps,
-        headroomFloorBps: config.quoting.headroomFloorBps
-      },
-      markets: {
-        initial: listed(),
-        maxAgeMs: LISTED_MARKETS_MAX_AGE_MS,
-        refreshMs: config.markets.refreshMs,
-        refresh: async () => listed()
-      },
-      prices: {
-        refreshMs: TOKEN_PRICES_REFRESH_MS,
-        validForMs: TOKEN_PRICES_VALID_MS,
-        refresh: async () => ({ table: {}, updatedAt: Date.now() })
-      },
-      routes: {
-        resolvePair: async () => null,
-        sweep: async () => {},
-        curveOf: () => undefined,
-        venues: config.venues.enabled
-      },
-      venue: { concurrency: 1 },
-      backoff: { baseBlocks: 1, maxBlocks: 4 },
-      runId: runIdAt(Date.now()),
-      maxReservations: TRANSACTION_KERNEL_RESERVATIONS,
+      markets: { initial: listed() },
+      refreshMarkets: async () => listed(),
+      refreshPrices: async () => ({ table: {}, updatedAt: Date.now() }),
+      routes: { resolvePair: async () => null, sweep: async () => {}, curveOf: () => undefined },
+      quoteFor,
+      simulate: data => simulateLiquidationExec(client, { executooor, eoa, data }),
+      readFees: chainFeeReads(client, config.chain),
       stats: createTickStats(),
       planSkipLog: createPlanSkipLog(),
       logger
@@ -329,7 +286,7 @@ describe.skipIf(!FORK_URL)('fork: end-to-end liquidation of seeded Base Midnight
     const ledger = await createLedgerStore(join(stateDirectory, ledgerFile!.name)).read()
     expect(ledger).toMatchObject({ nextNonce: sentCount })
     expect(ledger).toHaveProperty('nonces', {})
-    expect(await readJournalFile(journal.path)).toMatchObject({ status: 'clean' })
+    expect(await replayFile(created.path)).toBeGreaterThan(0)
 
     const after = await readPosition()
     expect(after?.valid, 'the position reads after the liquidation').toBe(true)

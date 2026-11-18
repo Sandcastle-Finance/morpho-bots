@@ -1,6 +1,6 @@
 import type { Keyed } from '@repo/engine'
 import type { Logger } from '@repo/kit'
-import type { QuoteOutcome, SwapPlan } from '@repo/swaps'
+import type { SwapPlan } from '@repo/swaps'
 
 import { digestOf, keyRecord } from '@repo/engine'
 import { describe, expect, it } from 'vitest'
@@ -318,10 +318,7 @@ describe('reading a quote', () => {
     ).toStrictEqual({ kind: 'route', seizedAssets: seize, swap })
     const answers: [QuoteDeps['quoteFor'], PositionQuote][] = [
       [async () => ({ kind: 'no_config' }), { kind: 'no_swap_path' }],
-      [
-        async () => ({ kind: 'failed', reason: 'no_route' }) as QuoteOutcome,
-        firstFailure('no_route')
-      ],
+      [async () => ({ kind: 'failed', reason: 'no_route' }), firstFailure('no_route')],
       [
         async () => {
           throw new Error('down')

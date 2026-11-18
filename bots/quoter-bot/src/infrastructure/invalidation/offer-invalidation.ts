@@ -3,7 +3,6 @@ import type { Address, Hex, PublicClient } from 'viem'
 
 import { midnightAbi } from '@morpho-org/midnight-sdk'
 import { midnightCommitmentGroup } from '@repo/validators'
-import { createPublicClient, http } from 'viem'
 
 import type { OperatorAdapterOperation } from '../../application/monitoring/operator-error-name.utils'
 import type { ConfigService } from '../../config/config.service'
@@ -12,7 +11,6 @@ import type { QuoterEngine, StartupWithdrawal } from '../../run'
 import type { MakerOfferGroup } from '../provider/offer-groups.utils'
 
 import { operatorErrorName } from '../../application/monitoring/operator-error-name.utils'
-import { supportedChain } from '../../config/supported-chains.utils'
 import {
   OfferInvalidationFailedError,
   BootstrapAdapterError,
@@ -58,11 +56,11 @@ export type OfferInvalidationFailureReport = {
 
 type Failure = OfferInvalidationFailureReport['failures'][number]
 
-/** What the command reads, injectable for tests. */
-type InvalidationReads = Readonly<{
-  client: Pick<PublicClient, 'getChainId' | 'getCode' | 'getBalance' | 'readContract'>
-  groups: () => Promise<readonly MakerOfferGroup[]>
-}>
+/** The chain reads the command's preflight makes. */
+type InvalidationClient = Pick<
+  PublicClient,
+  'getChainId' | 'getCode' | 'getBalance' | 'readContract'
+>
 
 const providerOperation = async <Result>(
   operation: OperatorAdapterOperation,
@@ -88,7 +86,8 @@ type Withdrawn = Readonly<{ txHash?: Hex; error?: unknown }>
  * the group exposed or live.
  * @param config - Validated runtime config.
  * @param context - `writer`: the signer and an engine start; without a
- * writer the run is read-only.
+ * writer the run is read-only. `client`: the process's shared chain read client. `groups` replaces
+ * the maker's offer-group read, for tests.
  * @returns `run`, which resolves with an applied or logged report.
  * @throws From `run`: `OfferInvalidationFailedError` when preflight, selection or the cancellation
  * fails, keeping the transaction a failed cancellation included; a maker-wide cancellation that
@@ -109,28 +108,25 @@ export const createOfferInvalidation = (
         onStartupSent?: (hash: Hex) => void
       }) => Promise<QuoterEngine>
     }>
-    reads?: InvalidationReads
+    client: InvalidationClient
+    groups?: () => Promise<readonly MakerOfferGroup[]>
   }
 ) => {
   const { identity } = config
   const maker = identity.maker
   const writer = identity.readOnly ? undefined : context.writer
   const delegated = !identity.readOnly && identity.method === 'aws'
-  const reads: InvalidationReads = context.reads ?? {
-    client: createPublicClient({
-      chain: supportedChain(config.chainId),
-      transport: http(config.rpcUrl, { timeout: config.requestTimeoutMs })
-    }),
-    groups: () =>
+  const { client } = context
+  const readGroups =
+    context.groups ??
+    (() =>
       readMakerOfferGroups({
         adapterError: BootstrapAdapterError,
         chainId: config.chainId,
         maker,
         morphoApiBaseUrl: config.morphoApiBaseUrl,
         requestTimeoutMs: config.requestTimeoutMs
-      })
-  }
-  const { client } = reads
+      }))
 
   const preflight = () =>
     providerOperation('preflight', async () => {
@@ -165,7 +161,7 @@ export const createOfferInvalidation = (
   /** The groups the command cancels, or renders read-only: every active indexed group, and every group the ledger holds. */
   const writable = (ledger: readonly KernelGroup[]) =>
     providerOperation('offer-groups-read', async () =>
-      offerInvalidationGroupIds(await reads.groups(), heldOf(ledger), [])
+      offerInvalidationGroupIds(await readGroups(), heldOf(ledger), [])
     )
 
   /**

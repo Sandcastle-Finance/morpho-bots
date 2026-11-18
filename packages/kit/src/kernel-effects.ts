@@ -1,5 +1,5 @@
 import type { KernelEffects } from '@repo/kernel'
-import type { Client, Hex, LocalAccount, TypedDataDefinition } from 'viem'
+import type { Address, Client, Hex, LocalAccount, TypedDataDefinition } from 'viem'
 
 import { bigintMin, mulDivUp } from '@repo/utils'
 import { BaseError, getAddress, isAddressEqual, RpcError, withTimeout } from 'viem'
@@ -69,7 +69,7 @@ const MARKET_TIP_TIMEOUT_MS = 2_000
  * `undefined` when the node answers no reward data, fails or is slower than
  * {@link MARKET_TIP_TIMEOUT_MS}, which leaves {@link initialFees} its own tip and warns once.
  */
-const createMarketTip = (client: Client, logger: Logger | undefined) => {
+export const createMarketTip = (client: Client, logger: Logger | undefined) => {
   const freshMs = (client.chain && BLOCK_TIME_MS.get(client.chain.id)) ?? 0
   let cached: { settledAt?: number; tip: Promise<bigint | undefined> } | undefined
   let warned = false
@@ -118,8 +118,8 @@ export const createKernelEffects = (options: {
   typedSigner?: LocalAccount
   /** The bot's policy ceiling on one gas unit. */
   maxFeePerGasWei: bigint
-  /** The signer's gas-limit ceiling for an ordinary payload. */
-  maxGasLimit: bigint
+  /** The signer's gas-limit ceiling for an ordinary payload, or for each by its target and calldata. */
+  maxGasLimit: bigint | ((request: Readonly<{ to: Address; data: Hex }>) => bigint)
   /** Warned once when the node serves no fee history, and first bids tip a quarter of their cap. */
   logger?: Logger
   materialize: KernelEffects['materialize']
@@ -158,9 +158,14 @@ export const createKernelEffects = (options: {
       const ceiling = feeCeiling(options.maxFeePerGasWei, recoveryFee)
       const perGas = bigintMin(kind === 'step' ? stepCap(ceiling) : ceiling, fee / estimatedGas)
       const baseFee = await signer.getBaseFee()
+      const { maxGasLimit } = options
       const gasLimit = gasLimitFor(
         estimatedGas,
-        isAddressEqual(request.to, from) ? NONCE_FILL_MAX_GAS : options.maxGasLimit
+        isAddressEqual(request.to, from)
+          ? NONCE_FILL_MAX_GAS
+          : typeof maxGasLimit === 'bigint'
+            ? maxGasLimit
+            : maxGasLimit(request)
       )
       let signed: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; gas: bigint }
       if (outbid) {

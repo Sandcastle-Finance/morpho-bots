@@ -1,17 +1,38 @@
+import type { Plugin } from 'esbuild'
+
 import { build as esbuild } from 'esbuild'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { transformSolTemplates } from 'soltag/unplugin'
 
 import { BundleFailedError } from './errors'
 
-// Bundles the bot entrypoint to `dist/` so production runs a plain `node` with no TypeScript
-// transform at startup. This bot holds no soltag `sol``` templates, so no transform plugin is wired.
+// Bundles the bot entrypoint to `dist/` with the soltag `sol``` templates compiled to literal
+// ABIs/bytecode, so production runs a plain `node` with no TypeScript or Solidity transform.
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST_DIR = join(ROOT, 'dist')
 rmSync(DIST_DIR, { recursive: true, force: true })
+
+const ESCAPED = ROOT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// This bot's own TS sources only — bundled workspace deps ship prebuilt dist and hold no templates.
+const INCLUDE = new RegExp(`^${ESCAPED}/src/.*\\.ts$`)
+
+const soltagPlugin: Plugin = {
+  name: 'soltag',
+  setup(build) {
+    build.onLoad({ filter: INCLUDE }, async ({ path }) => {
+      const source = await readFile(path, 'utf8')
+      const transformed = transformSolTemplates(source, path, {
+        solc: { optimizer: { enabled: true, runs: 200 } }
+      })
+      return { contents: transformed?.code ?? source, loader: 'ts' as const }
+    })
+  }
+}
 
 let manifest: { version?: string }
 try {
@@ -50,7 +71,8 @@ try {
       'process.env.QUOTER_BOT_VERSION': JSON.stringify(manifest.version ?? '0.0.0'),
       'process.env.QUOTER_BOT_BUILD_IMAGE_TAG': JSON.stringify(imageTag),
       ...(revision && { 'process.env.QUOTER_BOT_BUILD_REVISION': JSON.stringify(revision) })
-    }
+    },
+    plugins: [soltagPlugin]
   })
 } catch (error) {
   throw new BundleFailedError(error instanceof Error ? error.message : String(error))

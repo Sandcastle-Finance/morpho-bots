@@ -38,6 +38,8 @@ describe('superviseKernelBot', () => {
     expect(exitCode).toBe(0)
     await expect(bot.stopped).resolves.toMatchObject({ outcome: 'clean' })
     expect((await stat(journal.path)).size).toBeGreaterThanOrEqual(runCapBytes)
-    await expect(readJournalFile(journal.path)).resolves.toMatchObject({ status: 'clean' })
+    expect((await Array.fromAsync(readJournalFile(journal.path))).at(-1)).toMatchObject({
+      status: 'clean'
+    })
   }, 30_000)
 })

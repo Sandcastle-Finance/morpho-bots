@@ -199,6 +199,11 @@ export const MUTATIONS: readonly Mutation[] = [
     replace: 'if (false)'
   },
   {
+    id: 'a dependent step creates a commitment with an exposure other than admitted',
+    find: 'if (c.exposure !== admitted.spec.exposure)',
+    replace: 'if (false)'
+  },
+  {
     id: 'a step kind and its payload may disagree',
     find: 'if (STEP_PAYLOAD[spec.kind] !== spec.payload.kind)',
     replace: 'if (false)'
@@ -835,5 +840,71 @@ export const MUTATIONS: readonly Mutation[] = [
     id: 'a restart revives the age of an unknown that was covered',
     find: 'const aged = unknownSince !== undefined && uncovered(record, c)',
     replace: 'const aged = unknownSince !== undefined'
+  },
+  {
+    id: 'an out-of-range maxSimLagBlocks is trusted as given',
+    file: 'src/validation.ts',
+    find: '  maxSimLagBlocks: [0, MAX_BLOCKS],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range stuckBlocks is trusted as given',
+    file: 'src/validation.ts',
+    find: '  stuckBlocks: [1, MAX_BLOCKS],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range latchBoundBlocks is trusted as given',
+    file: 'src/validation.ts',
+    find: '  latchBoundBlocks: [0, MAX_BLOCKS],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range recoveryBoundMs is trusted as given',
+    file: 'src/validation.ts',
+    find: '  recoveryBoundMs: [1, MAX_INTEGER],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range revokeAfterStaleMs is trusted as given',
+    file: 'src/validation.ts',
+    find: '  revokeAfterStaleMs: [1, MAX_INTEGER],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range maxRecoveryAttempts is trusted as given',
+    file: 'src/validation.ts',
+    find: '  maxRecoveryAttempts: [1, MAX_INTEGER],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range maxDispatchLagMs is trusted as given',
+    file: 'src/validation.ts',
+    find: '  maxDispatchLagMs: [1, MAX_INTEGER]\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range pollMs is trusted as given',
+    file: 'src/validation.ts',
+    find: '  pollMs: [1, MAX_TIMER_MS],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range effectTimeoutMs is trusted as given',
+    file: 'src/validation.ts',
+    find: '  effectTimeoutMs: [1, MAX_TIMER_MS],\n',
+    replace: ''
+  },
+  {
+    id: 'an out-of-range reorgDepth is trusted as given',
+    file: 'src/validation.ts',
+    find: '  reorgDepth: [1, MAX_BLOCKS]\n',
+    replace: ''
+  },
+  {
+    id: 'a fee reserve that funds nothing is trusted as given',
+    file: 'src/validation.ts',
+    find: "typeof config.feeReserve === 'bigint' && config.feeReserve > 0n",
+    replace: 'true'
   }
 ]

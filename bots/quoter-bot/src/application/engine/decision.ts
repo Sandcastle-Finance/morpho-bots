@@ -2,10 +2,11 @@ import type { Data } from '@repo/engine'
 
 /**
  * What a market's decision asks the kernel for: `cancel` withdraws `payload.cancel`, `replace`
- * cancels it and publishes the prepared tree. `identity` is what the decision wants live.
+ * cancels it and publishes the prepared tree, `redeem` withdraws the maker's credit at par.
+ * `identity` is what the decision wants done.
  */
 export type Act = Readonly<{
-  kind: 'cancel' | 'replace'
+  kind: 'cancel' | 'replace' | 'redeem'
   identity: string
   payload: Data
   /** Operator-readable reason, logged at admission: "recenter: 530 vs 500 > 20". */
@@ -52,6 +53,11 @@ export type Outcome = Readonly<{
   kind: Act['kind']
   notice: 'settled' | 'refused' | 'abandoned' | 'compensated' | 'failed'
   reason?: string
+  /**
+   * On an act that ended `abandoned` or `compensated` after the kernel admitted the plan of the same
+   * market superseding it, that plan, whose outcome is the market's.
+   */
+  supersededBy?: string
   payload: Data
   transactions: readonly Readonly<{ step: number; hash: string; block: number }>[]
 }>

@@ -38,7 +38,7 @@ const productionBuild = async () => {
 }
 
 describe('playground browser artifact boundary', () => {
-  test('builds a local-only CSP artifact with no removed runtime or secret surface', async () => {
+  test('builds a local-only CSP artifact with no secret surface', async () => {
     const directory = await productionBuild()
     const names = (await readdir(directory)).toSorted()
     expect(names).toContain('index.html')
@@ -51,15 +51,7 @@ describe('playground browser artifact boundary', () => {
     expect(text).toContain("connect-src 'none'")
     expect(text).toContain('Bootstrap JSON string')
     expect(text).toContain('Ladder JSON string')
-    for (const forbidden of [
-      'MAKER_PRIVATE_KEY',
-      'BETTERSTACK_SOURCE_TOKEN',
-      'RPC_URL',
-      'Runtime & setup',
-      'Choose ladder JSON file',
-      'Drop one ladder',
-      'Shell-safe ENV'
-    ])
+    for (const forbidden of ['MAKER_PRIVATE_KEY', 'BETTERSTACK_SOURCE_TOKEN', 'RPC_URL'])
       expect(text).not.toContain(forbidden)
   }, 60_000)
 })

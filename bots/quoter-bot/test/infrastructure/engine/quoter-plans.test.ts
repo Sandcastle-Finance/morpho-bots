@@ -3,7 +3,7 @@ import type { Address, Hex } from 'viem'
 
 import { EcrecoverRatifierUtils, Offer, Payload, Tree } from '@morpho-org/midnight-sdk'
 import { getChainAddress } from '@morpho-org/morpho-ts'
-import { midnightPublicationPlan } from '@repo/validators'
+import { midnightPublicationPlan, midnightRedemption } from '@repo/validators'
 import { zeroAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { describe, expect, test, vi } from 'vitest'
@@ -11,7 +11,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { Act } from '../../../src/application/engine/decision'
 
 import { UnplannedPublicationError } from '../../../src/errors'
-import { quoterMaterializer } from '../../../src/infrastructure/engine/quoter-plans'
+import { quoterMaterializer, quoterSteps } from '../../../src/infrastructure/engine/quoter-plans'
 import { DRY_SIGNATURE } from '../../../src/infrastructure/kernel/dry-world'
 
 const CHAIN = 8453
@@ -38,8 +38,8 @@ const market = {
   liquidatorGate: zeroAddress
 }
 
-const evidence = (ratifier: 'ecrecoverRatifier' | 'setterRatifier') => [
-  Offer.create({
+const evidence = (ratifier: 'ecrecoverRatifier' | 'setterRatifier') => {
+  const params: Parameters<typeof Offer.create>[0] = {
     market,
     buy: false,
     maker: maker.address,
@@ -51,8 +51,9 @@ const evidence = (ratifier: 'ecrecoverRatifier' | 'setterRatifier') => [
     continuousFeeCap: 0n,
     reduceOnly: true,
     receiverIfMakerIsSeller: maker.address
-  } as Parameters<typeof Offer.create>[0])
-]
+  }
+  return [Offer.create(params)]
+}
 
 const replacement = (offers: ReturnType<typeof evidence>): Act => ({
   kind: 'replace',
@@ -110,9 +111,11 @@ describe('quoterMaterializer', () => {
   test('publishes a live Ecrecover tree with the signature the signer made', async () => {
     const offers = evidence('ecrecoverRatifier')
     const tree = Tree.create(offers)
-    const signature = await maker.signTypedData(
-      EcrecoverRatifierUtils.typedData({ tree, chainId: CHAIN }) as never
-    )
+    const typedData: Parameters<typeof maker.signTypedData>[0] = EcrecoverRatifierUtils.typedData({
+      tree,
+      chainId: CHAIN
+    })
+    const signature = await maker.signTypedData(typedData)
     const command = materializeCommand('ladder:publish', [signature])
     const expected = await midnightPublicationPlan({
       chainId: CHAIN,
@@ -206,12 +209,15 @@ describe('quoterMaterializer', () => {
     expect(built.payload).toMatchObject({ to: getChainAddress(CHAIN, 'midnightMempool') })
   })
 
+  const cancellation: Act = {
+    kind: 'cancel',
+    identity: 'c',
+    payload: { cancel: [] },
+    condition: 'test'
+  }
   test.each([
     ['an intent this run never submitted', undefined],
-    [
-      'a cancellation, which publishes nothing',
-      { kind: 'cancel', identity: 'c', payload: { cancel: [] }, condition: 'test' } as Act
-    ]
+    ['a cancellation, which publishes nothing', cancellation]
   ])('refuses to build %s', async (_, act) => {
     await expect(
       materializer({ ratifier: 'ecrecover', dry: false, act })(
@@ -236,5 +242,25 @@ describe('quoterMaterializer', () => {
         signal()
       )
     ).rejects.toBeInstanceOf(UnplannedPublicationError)
+  })
+})
+
+describe('quoterSteps', () => {
+  test('redeems in one withdraw of the maker credit to the maker', () => {
+    const redemption: Act = {
+      kind: 'redeem',
+      identity: 'redeem',
+      payload: { params: market, units: 40n },
+      condition: 'redeem: 40 units'
+    }
+    const signing = {
+      chainId: CHAIN,
+      maker: maker.address,
+      signer: maker.address,
+      ratifier: () => 'setter' as const
+    }
+    expect(quoterSteps(signing, redemption)).toStrictEqual([
+      { kind: 'tx', payload: midnightRedemption(CHAIN, maker.address, { market, units: 40n }) }
+    ])
   })
 })

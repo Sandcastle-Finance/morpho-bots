@@ -68,7 +68,7 @@ describe('the dry world', () => {
     const { raw, hash } = (await effects.signTx(
       payload,
       { nonce: 0, level: 0, kind: 'step', fee: 1n, recoveryFee: 1n },
-      guard as never
+      guard
     )) as { raw: string; hash: string }
     expect(await effects.broadcast(raw, guard as never)).toBe('accepted')
     expect(await chain.receipt(hash)).toBeNull()

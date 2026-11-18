@@ -85,6 +85,33 @@ describe('a graph declaration', () => {
     )
   })
 
+  it('says which nodes coalesce: a map and a fold do, a source, a clock and an emitted node do not', () => {
+    const g = createGraph('coalescing')
+    const level = g.level<number>('level')
+    const source = g.occurrences<number>('source')
+    const tick = g.clock('tick', { everyMs: 1, value: now => now })
+    const out = g.node<number>('out')
+    const fold = g.fold('fold', {
+      reads: { source: every(source) },
+      emits: [out],
+      initial: 0,
+      applyInput: (n, { value }) => ({ state: n + value, emit: [emitTo(out, value)] })
+    })
+    const map = g.scope('scoped', s =>
+      s.map('map', { reads: { fold: latest(fold) }, compute: ({ fold }) => fold })
+    )
+    expect([level, source, tick, out].map(node => g.coalesces(node))).toStrictEqual([
+      false,
+      false,
+      false,
+      false
+    ])
+    expect([fold, map].map(node => g.coalesces(node))).toStrictEqual([true, true])
+    expect(() => g.coalesces(createGraph('other').occurrences('source'))).toThrow(
+      GraphDefinitionError
+    )
+  })
+
   it('reads every write of an occurrence source, a clock and an emitted node', () => {
     const g = createGraph('streams')
     const source = g.occurrences<number>('source')

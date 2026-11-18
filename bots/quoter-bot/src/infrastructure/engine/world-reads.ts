@@ -2,19 +2,20 @@ import type { IMarket } from '@morpho-org/midnight-sdk'
 import type { Hex } from 'viem'
 
 import { midnightAbi } from '@morpho-org/midnight-sdk'
-import { morphoViemExtension } from '@morpho-org/morpho-sdk'
+import { getChainAddress } from '@morpho-org/morpho-ts'
 import { blockTagAt } from '@repo/kit'
-import { createPublicClient, erc20Abi, getAbiItem, http, isAddressEqual } from 'viem'
+import { erc20Abi, getAbiItem } from 'viem'
 
 import type { WorldPosition } from '../../application/engine/world'
 import type { ConfigService } from '../../config/config.service'
 import type { OwnedOverlapBookOffer } from '../../domain/intentional-overlap'
 import type { MakerOfferGroup } from '../provider/offer-groups.utils'
+import type { ReadClient } from '../provider/read-clients'
 
-import { supportedChain } from '../../config/supported-chains.utils'
 import { LadderAdapterError } from '../../errors'
 import { readLadderBookOffers } from '../ladder/ladder-book.utils'
 import { readMakerOfferGroups } from '../provider/offer-groups.utils'
+import { lensMarket, lensPosition, readMarketLens } from './market-lens.sol'
 
 /** One block, as every chain read of a poll is pinned to it by its hash. */
 export type WorldBlock = Readonly<{ number: bigint; hash: Hex; timestamp: bigint }>
@@ -32,8 +33,16 @@ export type WorldReads = Readonly<{
   readGroups: () => Promise<readonly MakerOfferGroup[]>
   /** A market's takeable book from the API now; not pinned to a block. */
   readBook: (marketId: Hex) => Promise<readonly OwnedOverlapBookOffer[]>
-  /** The maker's position in a market, accrued to `block`. */
-  readPosition: (marketId: Hex, block: WorldBlock) => Promise<WorldPosition>
+  /**
+   * The maker's position in each market, accrued to `block` and its credit again to `redeemBy`,
+   * read together, in `marketIds` order: one market's failure is its own entry; a failure of the
+   * whole read rejects.
+   */
+  readPositions: (
+    marketIds: readonly Hex[],
+    block: WorldBlock,
+    redeemBy: bigint
+  ) => Promise<readonly PromiseSettledResult<WorldPosition>[]>
   /** The maker's loan-token balance and Midnight allowance at `block`. */
   readCash: (block: WorldBlock) => Promise<{ cashBalance: bigint; allowance: bigint }>
   /** Each group's consumption at `block`, in `groupIds` order. */
@@ -46,23 +55,31 @@ const consumedAbi = [getAbiItem({ abi: midnightAbi, name: 'consumed' })]
  * The production world reads: the maker's offer groups and each ladder book from the Morpho API,
  * and every chain value pinned to the block it is asked at by hash (EIP-1898), so a read the node
  * cannot serve at that block fails rather than reading another fork's block of the same height.
- * @param config - Validated runtime config: chain, RPC, timeouts, and the maker.
+ * Markets and positions come from one batched lens read per call ({@link readMarketLens}).
+ * @param config - Validated runtime config: chain, API, timeouts, and the maker.
+ * @param client - The process's shared chain read client.
  * @returns The production reads; no request is made until called.
  */
-export const createWorldReads = (config: ConfigService): WorldReads => {
+export const createWorldReads = (config: ConfigService, client: ReadClient): WorldReads => {
   const maker = config.identity.maker
-  const client = createPublicClient({
-    chain: supportedChain(config.chainId),
-    transport: http(config.rpcUrl, { timeout: config.requestTimeoutMs })
-  }).extend(morphoViemExtension({ supportSignature: true, supportDeployless: true }))
-  const midnight = client.morpho.midnight(config.chainId)
+  const expected = {
+    chainId: config.chainId,
+    midnight: getChainAddress(config.chainId, 'midnight')
+  }
+  const readLens = (marketIds: readonly Hex[], block: WorldBlock) =>
+    readMarketLens(client, {
+      midnight: expected.midnight,
+      user: maker,
+      marketIds,
+      blockHash: block.hash
+    })
   return {
     readLatestBlock: async () => {
       const { number, hash, timestamp } = await client.getBlock({ blockTag: 'latest' })
       return { number, hash, timestamp }
     },
-    readMarket: (marketId, block) =>
-      midnight.getMarketData(marketId, { blockTag: blockTagAt(block.hash) }),
+    readMarket: async (marketId, block) =>
+      lensMarket(await readLens([marketId], block), { ...expected, marketId }),
     readGroups: () =>
       readMakerOfferGroups({
         adapterError: LadderAdapterError,
@@ -77,32 +94,19 @@ export const createWorldReads = (config: ConfigService): WorldReads => {
         marketIds: [marketId],
         timeoutMs: config.requestTimeoutMs
       }),
-    readPosition: async (marketId, block) => {
-      const data = await midnight.getPositionData({
-        marketId,
-        accountAddress: maker,
-        parameters: { blockTag: blockTagAt(block.hash) }
-      })
-      const position = data.accrueInterest(block.timestamp)
-      const loanIndex = data.market.params.collateralParams.findIndex(slot =>
-        isAddressEqual(slot.token, data.market.params.loanToken)
+    readPositions: async (marketIds, block, redeemBy) => {
+      const outputs = await readLens(marketIds, block)
+      return Promise.allSettled(
+        marketIds.map(async marketId =>
+          lensPosition(outputs, {
+            ...expected,
+            marketId,
+            user: maker,
+            timestamp: block.timestamp,
+            redeemBy
+          })
+        )
       )
-      const loanSlot = data.market.params.collateralParams[loanIndex]
-      const assets = loanSlot === undefined ? undefined : position.collateral[loanIndex]
-      if (loanSlot !== undefined && assets === undefined)
-        throw new LadderAdapterError('position-unavailable')
-      return {
-        marketId,
-        ...(loanSlot === undefined
-          ? {}
-          : { loanCollateral: { assets: assets!, lltv: loanSlot.lltv } }),
-        credit: position.credit,
-        debt: position.debt,
-        lossFactor: data.market.lossFactor,
-        maturity: data.market.params.maturity,
-        tickSpacing: data.market.tickSpacing,
-        continuousFee: data.market.continuousFee
-      }
     },
     readCash: async block => {
       const [cashBalance, allowance] = await Promise.all([

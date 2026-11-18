@@ -8,6 +8,7 @@ import type { WorldBlock, WorldReads } from '../../../src/infrastructure/engine/
 
 import { LadderAdapterError } from '../../../src/errors'
 import { readWorld } from '../../../src/infrastructure/engine/quoter-sources'
+import { marketParams } from '../../application/engine/world.fixtures'
 
 const maker: Hex = '0x1111111111111111111111111111111111111111'
 const marketId: Hex = `0x${'11'.repeat(32)}`
@@ -30,15 +31,21 @@ const reads = (overrides: Partial<WorldReads> = {}): WorldReads => ({
     }
   ],
   readBook: async () => [],
-  readPosition: async (market, block) => ({
-    marketId: market,
-    credit: block.number,
-    debt: 0n,
-    lossFactor: 0n,
-    maturity: 10_000n,
-    tickSpacing: 4,
-    continuousFee: 0
-  }),
+  readPositions: async (ids, block) =>
+    Promise.allSettled(
+      ids.map(async market => ({
+        marketId: market,
+        credit: block.number,
+        debt: 0n,
+        lossFactor: 0n,
+        maturity: 10_000n,
+        tickSpacing: 4,
+        continuousFee: 0,
+        params: marketParams,
+        withdrawable: 0n,
+        redeemableCredit: block.number
+      }))
+    ),
   readCash: async () => ({ cashBalance: 50n, allowance: 50n }),
   readConsumed: async groupIds =>
     groupIds.map(groupId => (groupId === v0Group ? MAX_OFFER_CAP : 0n)),
@@ -46,10 +53,13 @@ const reads = (overrides: Partial<WorldReads> = {}): WorldReads => ({
 })
 
 /** One world read at the kernel head 7, for the ladder market and, unless off, the bootstrap one. */
-const poll = async (parameters: { reads?: WorldReads; bootstrap?: boolean } = {}) => {
+const poll = async (
+  parameters: { reads?: WorldReads; bootstrap?: boolean; readAt?: number } = {}
+) => {
+  const readAt = parameters.readAt ?? 5_000
   const write = await readWorld({
     at: { number: 7, hash: `0x${'07'.repeat(32)}`, timestamp: 1_000n },
-    readAt: 5_000,
+    readAt,
     ownership: {
       ladderPublications: [],
       bootstrapGroupIds: [v0Group],
@@ -64,7 +74,7 @@ const poll = async (parameters: { reads?: WorldReads; bootstrap?: boolean } = {}
       ...(parameters.bootstrap === false ? [] : [{ strategy: 'bootstrap' as const, marketId }])
     ],
     accounting: { maker, marketIds: [marketId, otherMarketId], v0OfferGroupIds: [v0Group] },
-    expiry: 5_000 + 3 * EVERY_MS
+    expiry: readAt + 3 * EVERY_MS
   })
   if (write.coverage !== 'complete') throw new TypeError('the world read failed')
   return write
@@ -120,8 +130,25 @@ describe('readWorld', () => {
     expect(asked).toEqual([[indexedGroup, v0Group]])
   })
 
-  test('expires the read a fixed number of polls after it started', async () => {
-    expect((await poll()).expiry).toBe(5_000 + 3 * EVERY_MS)
+  test.each([
+    ['the head, when the wall clock trails it', 5_000, 1_003n],
+    ['the wall clock, when the head trails it', 1_010_000, 1_013n]
+  ])('accrues redeemable credit to the read expiry by %s', async (_, readAt, redeemBy) => {
+    const asked: bigint[] = []
+    await poll({
+      readAt,
+      reads: reads({
+        readPositions: async (ids, block, until) => {
+          asked.push(until)
+          return reads().readPositions(ids, block, until)
+        }
+      })
+    })
+    expect(asked).toEqual([redeemBy])
+  })
+
+  test('stamps the write with the expiry its poll set', async () => {
+    expect((await poll()).expiry).toBe(8_000)
   })
 
   test('keeps a failed read as a failed value of the keys that read it', async () => {
@@ -154,16 +181,25 @@ describe('readWorld', () => {
     }
     const write = await poll({
       reads: reads({
-        readPosition: async (market, block) =>
-          atHeld(block, {
-            marketId: market,
-            credit: 0n,
-            debt: 0n,
-            lossFactor: 0n,
-            maturity: 10_000n,
-            tickSpacing: 4,
-            continuousFee: 0
-          }),
+        readPositions: async (ids, block) =>
+          atHeld(
+            block,
+            ids.map(market => ({
+              status: 'fulfilled' as const,
+              value: {
+                marketId: market,
+                credit: 0n,
+                debt: 0n,
+                lossFactor: 0n,
+                maturity: 10_000n,
+                tickSpacing: 4,
+                continuousFee: 0,
+                params: marketParams,
+                withdrawable: 0n,
+                redeemableCredit: 0n
+              }
+            }))
+          ),
         readCash: async block => atHeld(block, { cashBalance: 50n, allowance: 50n }),
         readConsumed: async (groupIds, block) =>
           atHeld(
@@ -178,6 +214,31 @@ describe('readWorld', () => {
     expect(world.positions).toEqual({ [marketId]: failed, [otherMarketId]: failed })
     expect(world.cash).toEqual(failed)
     expect(world.consumed).toEqual(failed)
+  })
+
+  test('reads every position in one call, a market that failed in it failing only its own entry', async () => {
+    const asked: (readonly Hex[])[] = []
+    const write = await poll({
+      reads: reads({
+        readPositions: async (ids, block) => {
+          asked.push(ids)
+          return [
+            { status: 'rejected', reason: new LadderAdapterError('position-unavailable') },
+            ...(await reads().readPositions(ids.slice(1), block, block.timestamp))
+          ]
+        }
+      })
+    })
+
+    expect(asked).toEqual([[marketId, otherMarketId]])
+    expect(entry(write, `ladder:${marketId}`).positions).toEqual({
+      [marketId]: {
+        ok: false,
+        errorName: 'LadderAdapterError',
+        adapterOperation: 'position-unavailable'
+      },
+      [otherMarketId]: { ok: true, value: expect.objectContaining({ marketId: otherMarketId }) }
+    })
   })
 
   test('a book provider failure is a failed book, not a missing observation', async () => {

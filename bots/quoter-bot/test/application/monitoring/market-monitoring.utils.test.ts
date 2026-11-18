@@ -205,6 +205,26 @@ describe('createMarketProjection', () => {
         txHash
       }
     ])
+    expect(events.filter(event => 'redeemedUnits' in event)).toEqual([])
+  })
+
+  test('reports a settled redemption with the units it redeemed', () => {
+    const txHash = `0x${'44'.repeat(32)}` as const
+    const events = createMarketProjection()([
+      {
+        workflow: 'ladder',
+        marketId,
+        status: 'applied',
+        action: 'redeem',
+        redeemedUnits: 40n,
+        transactions: [{ operation: 'redeem', txHash }]
+      }
+    ])
+
+    expect(events).toContainEqual(expect.objectContaining({ operation: 'redeem', txHash }))
+    const redeemed = events.filter(event => 'redeemedUnits' in event)
+    expect(redeemed).toHaveLength(1)
+    expect(redeemed[0]).toMatchObject({ marketId, redeemedUnits: 40n, txHash })
   })
 })
 

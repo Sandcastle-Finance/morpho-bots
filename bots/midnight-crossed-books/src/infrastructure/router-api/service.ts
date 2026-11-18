@@ -81,14 +81,14 @@ export class RouterApiService {
 
   async getTakeableBook(marketId: MarketId): Promise<TakeableBook> {
     const [asks, bids] = await Promise.all([
-      this._listSide(marketId, 'asks'),
-      this._listSide(marketId, 'bids')
+      this.listSide(marketId, 'asks'),
+      this.listSide(marketId, 'bids')
     ])
 
     return { asks, bids }
   }
 
-  private _listSide(marketId: MarketId, side: BookSide): Promise<TakeableOffer[]> {
+  private listSide(marketId: MarketId, side: BookSide): Promise<TakeableOffer[]> {
     return withOpenApiErrorBoundary(TAKEABLE_OFFERS_ENDPOINT, RouterApiError, async () => {
       const result = await this.client.GET(TAKEABLE_OFFERS_ENDPOINT, {
         params: { path: { 'market-id': marketId, side } }

@@ -29,7 +29,7 @@ const chainOf = (fake: Chain = {}) => {
   const minedIn = fake.minedIn ?? MINED_IN
   const transactions =
     fake.blockTransactions ??
-    ((n: number) => (n === minedIn ? [{ hash: TX_HASH, from: ACCOUNT, nonce: '0x0' as Hex }] : []))
+    ((n: number) => (n === minedIn ? [{ hash: TX_HASH, from: ACCOUNT, nonce: '0x0' }] : []))
   const block = (n: number, full: boolean) => ({
     number: fake.pendingHead && n === HEAD ? null : numberToHex(n),
     hash: fake.pendingHead && n === HEAD ? null : hashOf(n),

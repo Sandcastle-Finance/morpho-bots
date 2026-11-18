@@ -33,9 +33,11 @@ import {
   SetupCheckAbortedError
 } from '../src/errors'
 import { runQuoterBotEntrypoint } from '../src/infrastructure/cli/quoter-bot-entrypoint'
+import { createReadClients } from '../src/infrastructure/provider/read-clients'
 import { productionReferenceRates } from '../src/infrastructure/reference/reference-rates'
 import { dryHosting, quoterKernelConfig } from '../src/kernel'
 import { startQuoterEngine, type StartupWithdrawal } from '../src/run'
+import { marketParams } from './application/engine/world.fixtures'
 
 const CHAIN_ID = 8453
 const maker: Address = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A'
@@ -185,7 +187,7 @@ const offerTree = (buy: boolean, start = 1n) =>
       tick: 6_000n,
       maxUnits: 10n,
       continuousFeeCap: 0n
-    } as Parameters<typeof Offer.create>[0])
+    })
   ])
 
 const noCrossing = { crossed: false, clearable: false } as const
@@ -199,15 +201,21 @@ const worldReads = (cash = 0n): WorldReads => ({
   },
   readGroups: async () => [],
   readBook: async () => [],
-  readPosition: async id => ({
-    marketId: id,
-    credit: 0n,
-    debt: 0n,
-    lossFactor: 0n,
-    maturity: market.maturity,
-    tickSpacing: 4,
-    continuousFee: 0
-  }),
+  readPositions: async ids =>
+    Promise.allSettled(
+      ids.map(async id => ({
+        marketId: id,
+        credit: 0n,
+        debt: 0n,
+        lossFactor: 0n,
+        maturity: market.maturity,
+        tickSpacing: 4,
+        continuousFee: 0,
+        params: marketParams,
+        withdrawable: 0n,
+        redeemableCredit: 0n
+      }))
+    ),
   readCash: async () => ({ cashBalance: cash, allowance: cash }),
   readConsumed: async groupIds => groupIds.map(() => 0n)
 })
@@ -772,7 +780,8 @@ describe('createApplication', () => {
       {
         createState: () => state,
         createBootstrapAdapters: () => bootstrapAdapters(),
-        createReferenceRates: productionReferenceRates
+        createReferenceRates: config =>
+          productionReferenceRates(config, createReadClients(config).reference)
       }
     )
 
@@ -860,7 +869,8 @@ describe('createApplication', () => {
         createState: () => state,
         createLadderAdapters: () => ladderAdapters(),
         createWorldReads: fundedWorld,
-        createReferenceRates: productionReferenceRates
+        createReferenceRates: config =>
+          productionReferenceRates(config, createReadClients(config).reference)
       }
     )
 
@@ -1470,6 +1480,7 @@ describe('startup cancellation through the kernel', () => {
     let startup: StartupWithdrawal | undefined
     const engine = await startQuoterEngine({
       config,
+      clients: createReadClients(config),
       strategies: { ladder: false, bootstrap: false },
       kernel: dryHosting(config, entries),
       journal: memoryJournal,
@@ -1510,6 +1521,7 @@ describe('startup cancellation through the kernel', () => {
     try {
       const engine = await startQuoterEngine({
         config,
+        clients: createReadClients(config),
         strategies: { ladder: false, bootstrap: false },
         kernel: dryHosting(config, {}),
         journal: { build: { revision: 'abcdef0123456789', imageTag: 'test' }, runCapBytes: 1 },
@@ -1533,6 +1545,7 @@ describe('startup cancellation through the kernel', () => {
     const unreachable = () => Promise.reject(new Error('unreachable'))
     const error = await startQuoterEngine({
       config,
+      clients: createReadClients(config),
       strategies: { ladder: false, bootstrap: false },
       kernel: dryHosting(config, {}, () => operator.abort(), {
         latest: unreachable,

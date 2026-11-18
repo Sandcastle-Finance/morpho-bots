@@ -6,14 +6,12 @@ import { MetaMorphoAction, metaMorphoAbi } from '@morpho-org/blue-sdk-viem'
 import { runIdAt } from '@repo/controller'
 import { GraphFailedError } from '@repo/engine'
 import {
-  buildIdentityFromEnv,
   assertContractDeployed,
   createBalanceMonitor,
   createDeploylessClient,
   createHeartbeatMonitor,
   createJournalFileSink,
   createLogger,
-  parseJournalRunCapBytes,
   TRANSACTION_KERNEL_RESERVATIONS,
   simulateCall,
   withLogging
@@ -146,9 +144,9 @@ async function main() {
   const journal = await createJournalFileSink({
     directory: join(config.kernel.stateDirectory, 'journal'),
     graph: 'vault-v1-reallocation',
-    build: buildIdentityFromEnv(process.env),
+    build: config.kernel.journal.build,
     capacityBytes: JOURNAL_CAPACITY_BYTES,
-    runCapBytes: parseJournalRunCapBytes(process.env.JOURNAL_RUN_CAP_BYTES)
+    runCapBytes: config.kernel.journal.runCapBytes
   })
   logger.info('journal.pruned', journal.pruned)
   const running = await startReallocator({

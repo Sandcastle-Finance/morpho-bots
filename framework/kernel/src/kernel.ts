@@ -48,6 +48,7 @@ import { KernelConfigError } from './errors'
 import { isChainFact } from './types'
 import {
   authorityDefect,
+  configDefect,
   conflictsDefect,
   isCalldata,
   payloadDefect,
@@ -339,6 +340,8 @@ export const createKernel = (config: KernelConfig) => {
     throw new KernelConfigError(
       `maxEvidenceAgeBlocks must be an integer in [0, ${MAX_EVIDENCE_AGE_BLOCKS}]`
     )
+  const defect = configDefect(config)
+  if (defect) throw new KernelConfigError(defect)
   const readsVersion = (recorded: string) =>
     config.validators.some(
       v =>
@@ -1145,6 +1148,8 @@ export const createKernel = (config: KernelConfig) => {
         return `creates ${c.id} outside the admitted envelope`
       }
       if (admitted.state !== 'intended') return `creates ${c.id} that is already out`
+      if (c.exposure !== admitted.spec.exposure)
+        return `creates ${c.id} with an exposure other than admitted`
       const larger = Object.entries(c.resources).some(
         ([key, amount]) => amount > (admitted.spec.resources[key] ?? 0n)
       )
@@ -1437,7 +1442,7 @@ export const createKernel = (config: KernelConfig) => {
     if (nonce === s.nextNonce) s.nextNonce = nonce + 1
     plan.terms ??= { nonce, generation: 0 }
     recordEntries(s, step, nonce)
-    if (firstOfStep) addTo(plan.committedConsumes as Record<string, bigint>, reading.consumes)
+    if (firstOfStep) addTo(plan.committedConsumes, reading.consumes)
     plan.pending = { hash: signed.hash, raw: signed.raw }
     const entry = plan.recovery?.entry === undefined ? undefined : s.entries[plan.recovery.entry]
     const owner = entry && s.plans[entry.intentId]

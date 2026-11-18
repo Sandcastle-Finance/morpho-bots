@@ -1,4 +1,13 @@
-import type { Authority, Candidate, DecisionRecord, DurableLedger, Fact, SignedBid } from './types'
+import type { KernelHostOptions } from './host'
+import type {
+  Authority,
+  Candidate,
+  DecisionRecord,
+  DurableLedger,
+  Fact,
+  KernelConfig,
+  SignedBid
+} from './types'
 
 import { isObject, LEDGER_FORMAT, storedText } from './durable'
 import { HELD_STATES } from './types'
@@ -18,6 +27,55 @@ const isNats = (v: unknown) => Array.isArray(v) && v.every(isNat)
 const isResources = (v: unknown) => isObject(v) && Object.values(v).every(isAmount)
 const oneOf = (v: unknown, options: readonly string[]) =>
   typeof v === 'string' && options.includes(v)
+
+/** Far past any bot's need, and small enough that a block plus it stays a safe integer. */
+const MAX_BLOCKS = 2 ** 32
+const MAX_INTEGER = Number.MAX_SAFE_INTEGER
+/** Node runs a longer timer after 1 ms: https://nodejs.org/api/timers.html#settimeoutcallback-delay-args */
+const MAX_TIMER_MS = 2 ** 31 - 1
+
+type Range = readonly [min: number, max: number]
+
+/**
+ * The integer range, both ends inclusive, each numeric {@link KernelConfig} option must lie in;
+ * `createKernel` holds `maxEvidenceAgeBlocks` itself.
+ */
+const CONFIG_RANGES = {
+  maxSimLagBlocks: [0, MAX_BLOCKS],
+  stuckBlocks: [1, MAX_BLOCKS],
+  latchBoundBlocks: [0, MAX_BLOCKS],
+  recoveryBoundMs: [1, MAX_INTEGER],
+  revokeAfterStaleMs: [1, MAX_INTEGER],
+  maxRecoveryAttempts: [1, MAX_INTEGER],
+  maxDispatchLagMs: [1, MAX_INTEGER]
+} as const satisfies Partial<Record<keyof KernelConfig, Range>>
+
+const HOST_RANGES = {
+  pollMs: [1, MAX_TIMER_MS],
+  effectTimeoutMs: [1, MAX_TIMER_MS],
+  reorgDepth: [1, MAX_BLOCKS]
+} as const satisfies Partial<Record<keyof KernelHostOptions, Range>>
+
+const rangeDefect = (options: object, ranges: Readonly<Record<string, Range>>) => {
+  for (const [name, [min, max]] of Object.entries(ranges)) {
+    const value: unknown = (options as Record<string, unknown>)[name]
+    if (!(Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max))
+      return `${name} must be an integer in [${min}, ${max}]`
+  }
+  return undefined
+}
+
+/** Why a kernel host could not enforce `config` as given, or `undefined` when it can. */
+export const configDefect = (config: KernelConfig): string | undefined =>
+  rangeDefect(config, CONFIG_RANGES) ??
+  (typeof config.feeReserve === 'bigint' && config.feeReserve > 0n
+    ? undefined
+    : 'feeReserve must be a positive bigint')
+
+/** Why a kernel host could not run under `options` as given, or `undefined` when it can. */
+export const hostOptionsDefect = (
+  options: Pick<KernelHostOptions, keyof typeof HOST_RANGES>
+): string | undefined => rangeDefect(options, HOST_RANGES)
 
 /** A bid signed within a native spend ceiling of `fee`, with a positive gas limit. */
 const isSignedBid = (v: unknown, fee: bigint): v is SignedBid => {

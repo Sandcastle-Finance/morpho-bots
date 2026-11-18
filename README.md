@@ -5,7 +5,8 @@ shared packages they consume. Every bot is a long-running program that holds a k
 transactions, and moves funds on mainnets with no human approving each action, so the code favors
 safe and explainable over clever or fast.
 
-This is a [pnpm workspaces](https://pnpm.io/workspaces) monorepo:
+This is a [Bun workspaces](https://bun.com/docs/install/workspaces) monorepo. Bun installs
+packages and runs scripts; the bots, scripts, and tests run on Node:
 
 - `bots/` — individual bot apps (one per bot); each keeps its own `README.md`
 - `packages/` — shared libraries the bots depend on
@@ -44,23 +45,24 @@ repository's `quoter-bot-*` tags by the workflows under [`.github/workflows/`](.
 ## Getting started
 
 ```sh
-nvm use               # Node 24.22.1 (see .nvmrc)
-corepack enable pnpm  # pnpm 11.11.0, pinned by package.json#packageManager
-pnpm install
-pnpm build            # @repo/contracts ABIs, needed by the liquidation bots' tests
+nvm use               # Node 24.22.3 (see .nvmrc)
+curl -fsSL https://bun.com/install | bash -s "bun-v1.4.4"  # pinned by package.json#packageManager
+bun install
+bun run build       # @repo/contracts ABIs, needed by the liquidation bots' tests
 ```
 
-`pnpm` denies dependency lifecycle scripts by default — see `allowBuilds` in
-`pnpm-workspace.yaml`. An install that needs a new one fails loudly rather than running it.
+Dependency lifecycle scripts run only for the packages listed in `trustedDependencies` in
+`package.json`; Bun skips every other one and reports it (`bun pm untrusted`). Install settings
+live in `bunfig.toml`.
 
 ## Daily commands
 
 ```sh
-pnpm run lint          # oxlint, repo-wide
-pnpm format            # oxfmt, repo-wide
-pnpm -r run typecheck  # tsc --noEmit in every workspace package
-pnpm run knip          # dead-code detection
-pnpm test              # vitest projects plus Node playground suites
+bun run lint        # oxlint, repo-wide
+bun run format      # oxfmt, repo-wide
+bun run --filter '*' typecheck  # tsc --noEmit in every workspace package
+bun run knip        # dead-code detection
+bun run test        # vitest projects plus Node playground suites
 ```
 
 The fork and e2e suites under `bots/*/test/fork/` and `bots/quoter-bot/test/e2e/` fork Base at a

@@ -169,11 +169,11 @@ both `equalize-utilizations`.
 ## Running
 
 ```sh
-pnpm --filter @morpho-org/vault-v2-reallocation run build
+bun run --cwd bots/vault-v2-reallocation build
 CHAIN_ID=1 RPC_URL=… REALLOCATOR_PRIVATE_KEY=0x… VAULT_WHITELIST=0x… MAX_FEE_GWEI=… \
   FINALITY_1=safe KERNEL_STATE_DIR=./state KERNEL_ENROLLMENT=enrolling \
   JOURNAL_RUN_CAP_BYTES=1073741824 BUILD_REVISION=$(git rev-parse HEAD) BUILD_IMAGE_TAG=local \
-  pnpm --filter @morpho-org/vault-v2-reallocation run start
+  bun run --cwd bots/vault-v2-reallocation start
 ```
 
 Or via compose (one service per chain, both defaulting to `DRY_RUN=true`, each with its own
@@ -226,7 +226,7 @@ which also joins to this bot's own events keyed on `vault`.
 ## Testing
 
 ```sh
-pnpm vitest run --project vault-v2-reallocation
+bunx vitest run --project vault-v2-reallocation
 ```
 
 Pure unit tests cover both strategies (delta output, idle folding/top-up, three-level cap pools),
@@ -241,7 +241,7 @@ decision; the validator's conformance suite lives in `@repo/validators`. Scenari
 # fetchAccrualVaultV2 + cap-multicall path it replaced and diffs every field (markets paired by id,
 # in-Solidity cap ids checked against the SDK's derivations).
 RPC_URL=… CHAIN_ID=8453 VAULT=0x… \
-  pnpm --filter @morpho-org/vault-v2-reallocation run probe:lens
+  bun run --cwd bots/vault-v2-reallocation probe:lens
 ```
 
 and `DRY_RUN` against a live RPC for the full read → strategy → simulate path. Known live-evidence

@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import { VIRTUAL_ASSETS, VIRTUAL_SHARES, WAD } from '../../src/constants'
 import {
-  mulDivDown,
-  mulDivUp,
   toAssetsDown,
   toAssetsUp,
   toSharesDown,
@@ -19,8 +17,8 @@ describe('wad math', () => {
     expect(wMulDown(2n * WAD, 3n * WAD)).toBe(6n * WAD)
     expect(wMulDown(3n * 10n ** 17n, 14n * 10n ** 16n)).toBe(42n * 10n ** 15n) // 0.3 * 0.14 = 0.042
     expect(wDivDown(WAD, 2n * WAD)).toBe(WAD / 2n)
-    expect(wDivDown(1n, 3n)).toBe((1n * WAD) / 3n)
-    expect(wDivUp(1n, 3n)).toBe((1n * WAD) / 3n + 1n)
+    expect(wDivDown(1n, 3n)).toBe(333_333_333_333_333_333n)
+    expect(wDivUp(1n, 3n)).toBe(333_333_333_333_333_334n)
   })
 })
 
@@ -47,12 +45,7 @@ describe('shares math (virtual offsets)', () => {
   })
 
   it('rounds toAssetsUp up and toAssetsDown down on a fractional conversion', () => {
-    // shares that convert to a fractional asset amount: down floors, up ceils.
-    const tba = 3n
-    const tbs = 0n
-    expect(toAssetsDown(1n, tba, tbs)).toBe(
-      mulDivDown(1n, tba + VIRTUAL_ASSETS, tbs + VIRTUAL_SHARES)
-    )
-    expect(toAssetsUp(1n, tba, tbs)).toBe(mulDivUp(1n, tba + VIRTUAL_ASSETS, tbs + VIRTUAL_SHARES))
+    expect(toAssetsDown(1n, 3n, 0n)).toBe(0n)
+    expect(toAssetsUp(1n, 3n, 0n)).toBe(1n)
   })
 })

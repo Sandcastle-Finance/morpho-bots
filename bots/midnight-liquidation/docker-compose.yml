@@ -1,6 +1,6 @@
 # Runs the per-chain midnight-liquidation bots. Borrower candidates come from the markets
 # liquidation-candidates HTTP API (LIQUIDATION_CANDIDATES_API_URL, public by default), so there is no
-# indexer or database to run. The bots' build context is the repo root so the pnpm workspace
+# indexer or database to run. The bots' build context is the repo root so the Bun workspace
 # (packages/*) resolves — see Dockerfile. Build with BUILD_REVISION=$(git rev-parse HEAD) so the
 # journal names the source it ran.
 #

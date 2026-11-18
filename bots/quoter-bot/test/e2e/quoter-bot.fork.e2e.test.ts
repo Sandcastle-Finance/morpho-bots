@@ -1,4 +1,4 @@
-import type { Address, LocalAccount } from 'viem'
+import type { Address } from 'viem'
 
 import {
   MAX_CONTINUOUS_FEE,
@@ -21,7 +21,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { createWalletClient, http, publicActions, toFunctionSelector } from 'viem'
+import { createWalletClient, erc20Abi, http, publicActions, toFunctionSelector } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { base } from 'viem/chains'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -35,8 +35,10 @@ import { ConfigService } from '../../src/config/config.service'
 import { StartupCleanupFailedError, QuoterStartError } from '../../src/errors'
 import { createOfferInvalidation } from '../../src/infrastructure/invalidation/offer-invalidation'
 import { buildLadderTree } from '../../src/infrastructure/ladder/ladder-offer.utils'
-import { createSignerAccount } from '../../src/kernel'
+import { createReadClients } from '../../src/infrastructure/provider/read-clients'
+import { loadQuoterSigner, type QuoterSigner } from '../../src/kernel'
 import { startQuoterEngine, type QuoterEngine } from '../../src/run'
+import { localKms } from '../fixtures/local-kms'
 import { startAnvil, stopAnvil } from './anvil'
 import {
   ANVIL_DEFAULT_ACCOUNT,
@@ -140,6 +142,8 @@ const environment = (rpcUrl: string, apiBaseUrl: string) => ({
   MORPHO_API_BASE_URL: apiBaseUrl,
   ROUTER_API_BASE_URL: apiBaseUrl,
   REQUEST_TIMEOUT_MS: '30000',
+  // These flows hold their fills as credit; the redemption flow turns this back on.
+  REDEEM_WITHDRAWABLE: 'false',
   BOOTSTRAP_MARKETS: bootstrapConfiguration,
   LADDER_MARKETS: ladderConfiguration('0')
 })
@@ -152,6 +156,13 @@ const delegatedEnvironment = (rpcUrl: string, apiBaseUrl: string) => ({
   AWS_REGION: 'us-east-1',
   SIGNER_NATIVE_RESERVE_WEI: String(NATIVE_RESERVE)
 })
+
+/** The delegated signer, behind a KMS that holds its key as AWS would. */
+const delegatedSigner = (config: ConfigService) => {
+  const identity = config.identity
+  if (identity.readOnly) throw new TypeError('a delegated signer needs a signing identity')
+  return loadQuoterSigner(identity, { kms: localKms(DELEGATED_SIGNER) })
+}
 
 const setMakerAuthorization = async (
   handle: AnvilHandle,
@@ -274,21 +285,22 @@ const startWriter = async (
   handle: AnvilHandle,
   config: ConfigService,
   strategies: Readonly<Record<Strategy, boolean>>,
-  account?: LocalAccount
+  loaded?: QuoterSigner
 ) => {
   const identity = config.identity
   if (identity.readOnly) throw new TypeError('a writer needs a signing identity')
   // Every report since the last check; a market reports its act there, then rests while re-read.
   const cycles: Partial<Record<Strategy, Completed[]>> = {}
   const reported = (strategy: Strategy) => reportedResults(cycles[strategy] ?? [])
-  const signer = account ?? (await createSignerAccount(identity))
+  const signer = loaded ?? (await loadQuoterSigner(identity))
   const engine = await whileMining(
     handle,
     startQuoterEngine({
       config,
+      clients: createReadClients(config),
       journal: discardingJournal,
       strategies,
-      account: signer,
+      signer,
       writeEvent: event => {
         if (event.event.startsWith('kernel.')) console.info(JSON.stringify(event, jsonBigint))
         if (event.event === 'cycle.completed' && event.workflow !== 'setup-check')
@@ -599,6 +611,46 @@ describe('quoter-bot workflow on a pinned Base fork', () => {
     expect(await api.activeOffers()).toHaveLength(0)
   }, 300_000)
 
+  test('redeems withdrawable maker credit at par through the real Midnight withdraw', async () => {
+    expect(anvil).toBeDefined()
+    expect(api).toBeDefined()
+    if (!anvil || !api) return
+    const handle = anvil
+    const maker = ANVIL_DEFAULT_ACCOUNT.address
+    const cashOf = () =>
+      handle.client.readContract({
+        address: USDC,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [maker]
+      })
+    const snapshot = await handle.client.snapshot()
+    try {
+      await resetStateDirectory()
+      await finalizeHead(handle)
+      const config = ConfigService.from({
+        ...environment(handle.rpcUrl, api.baseUrl),
+        REDEEM_WITHDRAWABLE: 'true'
+      })
+      const bootstrap = await startWriter(handle, config, { ladder: false, bootstrap: true })
+      expect(await bootstrap.steady('bootstrap')).toMatchObject([
+        { status: 'applied', action: 'publish' }
+      ])
+      const fill = await takeMakerLend(handle, api, 250_000_000n)
+      expect(fill.makerPosition.credit).toBeGreaterThan(0n)
+      const cash = await cashOf()
+
+      expect(await bootstrap.recheck('bootstrap')).toEqual([
+        { marketId: MARKET_ID, status: 'applied', action: 'redeem' }
+      ])
+      expect(await cashOf()).toBeGreaterThan(cash)
+    } finally {
+      await Promise.all(writers.splice(0).map(engine => engine.abandon()))
+      await handle.client.revert({ id: snapshot })
+      await resetStateDirectory()
+    }
+  }, 240_000)
+
   test('previews a bootstrap publication read-only through the real world reads, sending nothing', async () => {
     expect(anvil).toBeDefined()
     expect(api).toBeDefined()
@@ -685,7 +737,7 @@ describe('quoter-bot workflow on a pinned Base fork', () => {
         anvil,
         config,
         { ladder: false, bootstrap: true },
-        DELEGATED_SIGNER
+        await delegatedSigner(config)
       )
 
       expect(await bootstrap.steady('bootstrap')).toMatchObject([
@@ -710,7 +762,7 @@ describe('quoter-bot workflow on a pinned Base fork', () => {
         anvil,
         config,
         { ladder: false, bootstrap: true },
-        DELEGATED_SIGNER
+        await delegatedSigner(config)
       )
       expect(await bootstrap.steady('bootstrap')).toMatchObject([
         { status: 'applied', action: 'publish' }
@@ -728,14 +780,17 @@ describe('quoter-bot workflow on a pinned Base fork', () => {
         ...delegatedEnvironment(anvil.rpcUrl, api.baseUrl),
         KERNEL_ENROLLMENT: 'enrolled'
       })
+      const signer = await delegatedSigner(enrolled)
       const invalidation = createOfferInvalidation(enrolled, {
+        client: createReadClients(enrolled).chain,
         writer: {
-          signer: DELEGATED_SIGNER.address,
+          signer: signer.address,
           start: options =>
             startQuoterEngine({
               config: enrolled,
+              clients: createReadClients(enrolled),
               strategies: { ladder: false, bootstrap: false },
-              account: DELEGATED_SIGNER,
+              signer,
               journal: discardingJournal,
               ...options
             })

@@ -1,0 +1,141 @@
+import type { GraphDescription, NodeProducer, ReadDescription } from './describe'
+
+/** Every bot's listing is rendered by its `test/graph-listing.test.ts`, which `-u` rewrites. */
+const REGENERATE = 'bunx vitest run graph-listing -u'
+
+const code = (text: string) => `\`${text}\``
+
+const producerText = (producer: NodeProducer) =>
+  producer.by === 'clock'
+    ? `clock, every ${producer.everyMs} ms`
+    : producer.by === 'emit'
+      ? `emitted by ${code(producer.fold)}`
+      : producer.by === 'result'
+        ? `result of ${code(producer.effect)}`
+        : producer.by
+
+const readLine = (verb: string, read: Omit<ReadDescription, 'mode'> & { mode?: string }) =>
+  `  - ${verb} ${code(read.alias)} from ${code(read.node)}${read.mode ? `: ${read.mode}` : ''}`
+
+const entryPointsSection = (d: GraphDescription) => {
+  const inputs = d.nodes.filter(
+    node => node.producer.by === 'source' || node.producer.by === 'clock'
+  )
+  return [
+    '## Entry points',
+    '',
+    ...inputs.map(node => `- ${code(node.id)}: ${producerText(node.producer)}`),
+    ...(inputs.length === 0 ? ['No source or clock nodes.'] : [])
+  ]
+}
+
+const nodesSection = (d: GraphDescription) => [
+  '## Nodes',
+  '',
+  'By id. Direct consumers list each reader once per read mode or effect role; aliases remain in Operators and Effects below. These are declared dependencies, not transitive paths. "None declared" does not imply the node is unused outside these declarations.',
+  '',
+  '| Node | Kind | Shape | Producer | Notes | Direct consumers |',
+  '| --- | --- | --- | --- | --- | --- |',
+  ...d.nodes.map(node => {
+    const notes = [node.coalesces && 'coalesces', node.expires && 'expires'].filter(Boolean)
+    const consumers = [
+      ...d.operators.flatMap(op =>
+        op.reads.filter(read => read.node === node.id).map(read => `${code(op.id)} (${read.mode})`)
+      ),
+      ...d.effects.flatMap(effect => [
+        ...effect.requests
+          .filter(read => read.node === node.id)
+          .map(() => `${code(effect.id)} (effect request)`),
+        ...effect.samples
+          .filter(read => read.node === node.id)
+          .map(() => `${code(effect.id)} (effect sample)`)
+      ])
+    ]
+    return `| ${code(node.id)} | ${node.kind} | ${node.shape} | ${producerText(node.producer)} | ${notes.join(', ')} | ${consumers.length === 0 ? 'None declared' : [...new Set(consumers)].join('<br>')} |`
+  })
+]
+
+const operatorsSection = (d: GraphDescription) => [
+  '## Operators',
+  '',
+  "In evaluation order. A fold's `afterInputs` runs once after that evaluation's inputs.",
+  '',
+  ...d.operators.flatMap(op => [
+    `- ${code(op.id)}: ${op.kind}${op.kind === 'fold' && op.afterInputs ? ', with afterInputs' : ''}`,
+    ...op.reads.map(read => readLine('reads', read)),
+    ...(op.kind === 'fold' ? op.emits.map(node => `  - emits ${code(node)}`) : [])
+  ])
+]
+
+const effectsSection = (d: GraphDescription) => [
+  '## Effects',
+  '',
+  'In dispatch order. Omitted results mean no declared graph-result stream, not no external side effects. Omitted policies mean none of the optional policies are declared; listed policies show presence, not callback decisions.',
+  '',
+  ...d.effects.flatMap(effect => [
+    `- ${code(effect.id)}: lane ${code(effect.lane)}`,
+    ...effect.requests.map(request => readLine('requests', request)),
+    ...effect.samples.map(sample => readLine('samples', sample)),
+    ...(effect.results === undefined ? [] : [`  - results: ${code(effect.results)}`]),
+    ...(effect.policies.length === 0
+      ? []
+      : [`  - policies: ${effect.policies.map(code).join(', ')}`])
+  ])
+]
+
+const lanesSection = (d: GraphDescription) => [
+  '## Lanes',
+  '',
+  'In the order the runner serves them. Effects share a lane only when they share its declaration.',
+  '',
+  '| Lane | Concurrency | Queue | Budget | Effects |',
+  '| --- | --- | --- | --- | --- |',
+  ...d.lanes.map(lane => {
+    const budget = lane.budget ? `${lane.budget.calls} per ${lane.budget.perMs} ms` : 'none'
+    const effects = d.effects.filter(effect => effect.lane === lane.name).map(e => code(e.id))
+    return `| ${code(lane.name)} | ${lane.concurrency} | ${lane.queue} | ${budget} | ${effects.join(', ')} |`
+  })
+]
+
+const recoverySection = (d: GraphDescription) => [
+  '## Recovery',
+  '',
+  ...(d.recovery
+    ? [
+        'After a failure outside the recovery scope, only these members run, to wind the scope down; then the runner stops. A failure inside the scope stops the runner at once. Members by id:',
+        '',
+        ...d.recovery.map(member => `- ${code(member)}`)
+      ]
+    : ['No recovery scope.'])
+]
+
+type ListingContext = Readonly<{ declaration: string; fixture: string; spec: string }>
+
+/** A description as a Markdown listing, with optional links relative to the listing's location. */
+export const graphMarkdown = (description: GraphDescription, context?: ListingContext) =>
+  [
+    `# ${code(description.id)} graph`,
+    '',
+    `Generated by \`describeGraph\`, description format ${description.format}. Do not edit.`,
+    '',
+    ...(context
+      ? [
+          `This describes the [listing fixture](${context.fixture}), not a deployed configuration. See the [declaration](${context.declaration}) for conditions and tuning and the [engine specification](${context.spec}) for semantics. Regenerate with ${code(REGENERATE)} at the repository root.`,
+          ''
+        ]
+      : []),
+    "A `state` always holds a value, starting at build time; a `value` may be unwritten, unknown or failed; a `stream` delivers each write and holds nothing before its first. `coalesces` suppresses writes identical to the last record. `expires` marks a declared expiry extractor, not a TTL; a level's per-write expiry is not shown.",
+    '',
+    'A read is `latest` (a change schedules the reader), `sample` (read when something else schedules the reader; it schedules the reader itself only when the node becomes readable from unreadable), `every` (each write, in delivery order) or `watch` (the record, once per step that writes it or passes an expiry).',
+    '',
+    'Effect requests are `every` reads. An effect sample reads the current value when called; it creates no request, but a `ready` policy may use it to release queued work.',
+    '',
+    ...[
+      entryPointsSection,
+      nodesSection,
+      operatorsSection,
+      effectsSection,
+      lanesSection,
+      recoverySection
+    ].flatMap(section => [...section(description), ''])
+  ].join('\n')

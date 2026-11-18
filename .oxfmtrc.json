@@ -18,12 +18,14 @@
     ]
   },
   "ignorePatterns": [
-    "pnpm-lock.yaml",
+    "bun.lock",
     "**/dist/**",
     "**/build/**",
     "**/coverage/**",
     "**/generated/**",
     "**/node_modules/**",
-    "**/helm/**/templates/**"
+    "**/helm/**/templates/**",
+    "deploy/**/*.yaml",
+    "bots/*/GRAPH.md"
   ]
 }

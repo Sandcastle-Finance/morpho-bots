@@ -44,6 +44,7 @@ export function createDeploylessClient(options: {
   chain: Chain
   rpcUrl: string
   rpcUrlFallback?: string | undefined
+  timeoutMs?: number | undefined
   env?: Record<string, string | undefined>
 }): Client<Transport<BatchLensTransportType>> {
   const chain = withDlcFacts(options.chain)
@@ -53,6 +54,7 @@ export function createDeploylessClient(options: {
       chainId: chain.id,
       rpcUrl: options.rpcUrl,
       rpcUrlFallback: options.rpcUrlFallback,
+      timeoutMs: options.timeoutMs,
       batchSize: maxBatchSize(options.env ?? process.env)
     })
   })

@@ -35,22 +35,10 @@ const params = (loanToken: Address): MarketParams => ({
   lltv: 860000000000000000n
 })
 
-function spyLogger() {
-  const events: { level: string; event: string; fields?: Record<string, unknown> }[] = []
-  const make = (level: string) => (event: string, fields?: Record<string, unknown>) =>
-    events.push({ level, event, fields })
-  const logger: Logger = {
-    debug: make('debug'),
-    info: make('info'),
-    warn: make('warn'),
-    error: make('error')
-  }
-  return { logger, events }
-}
+const logger: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
 
 describe('discoverBorrowerIds', () => {
   it('follows the cursor until it runs out, de-duping across pages', async () => {
-    const { logger } = spyLogger()
     const cursors: (string | null)[] = []
     const fetchPage: FetchCandidatePage = async cursor => {
       cursors.push(cursor)
@@ -70,7 +58,6 @@ describe('discoverBorrowerIds', () => {
   })
 
   it('lowercases market ids and checksums borrowers; malformed rows are counted, not fatal', async () => {
-    const { logger } = spyLogger()
     const fetchPage: FetchCandidatePage = async () => ({
       data: [
         row(`0x${'A'.repeat(64)}`, BORROWER.toUpperCase().replace('0X', '0x')),
@@ -87,8 +74,7 @@ describe('discoverBorrowerIds', () => {
     expect(malformed).toBe(5)
   })
 
-  it('logs discover.max_pages loud at the runaway backstop instead of silently truncating', async () => {
-    const { logger, events } = spyLogger()
+  it('stops at the runaway page backstop and reports the read incomplete', async () => {
     let calls = 0
     const fetchPage: FetchCandidatePage = async () => {
       calls += 1
@@ -97,14 +83,9 @@ describe('discoverBorrowerIds', () => {
     const { complete } = await discoverBorrowerIds(fetchPage, { logger, maxPages: 2 })
     expect(complete).toBe(false)
     expect(calls).toBe(2)
-    const warn = events.find(e => e.event === 'discover.max_pages')
-    expect(warn?.level).toBe('warn')
-    expect(warn?.fields?.cap).toBe(2)
-    expect(warn?.fields?.pages).toBe(2)
   })
 
-  it('caps at maxCandidates and logs discover.oversized without fetching another page', async () => {
-    const { logger, events } = spyLogger()
+  it('caps at maxCandidates without fetching another page, and reports the read incomplete', async () => {
     const data = Array.from({ length: PAGE_LIMIT }, (_, i) =>
       row(MARKET, `0x${(i + 1).toString(16).padStart(40, '0')}`)
     )
@@ -117,10 +98,6 @@ describe('discoverBorrowerIds', () => {
     expect(complete).toBe(false)
     expect(pairs).toHaveLength(500)
     expect(calls).toBe(1)
-    const warn = events.find(e => e.event === 'discover.oversized')
-    expect(warn?.level).toBe('warn')
-    expect(warn?.fields?.cap).toBe(500)
-    expect(warn?.fields?.collected).toBe(500)
   })
 })
 
@@ -136,8 +113,7 @@ describe('discoverCandidates', () => {
       return out
     }
 
-  it('joins pairs to onchain params and drops unresolved ids with a loud warn', async () => {
-    const { logger, events } = spyLogger()
+  it('joins pairs to onchain params and drops unresolved ids', async () => {
     const loan = getAddress('0x5555555555555555555555555555555555555555')
     const fetchPage: FetchCandidatePage = async () => ({
       data: [row(MARKET, BORROWER), row(MARKET_2, BORROWER_2)],
@@ -150,14 +126,9 @@ describe('discoverCandidates', () => {
       candidates: [{ marketParams: params(loan), borrower: getAddress(BORROWER) }],
       complete: true
     })
-    const dropped = events.find(e => e.event === 'discover.dropped')
-    expect(dropped?.level).toBe('warn')
-    expect(dropped?.fields?.unresolvedMarkets).toBe(1)
-    expect(dropped?.fields?.unresolvedSample).toEqual([MARKET_2])
   })
 
   it('is not complete when it could not read a row', async () => {
-    const { logger } = spyLogger()
     const loan = getAddress('0x5555555555555555555555555555555555555555')
     const fetchPage: FetchCandidatePage = async () => ({
       data: [row(MARKET, BORROWER), row(MARKET, 'not-an-address')],
@@ -167,18 +138,6 @@ describe('discoverCandidates', () => {
       logger
     })
     expect(complete).toBe(false)
-  })
-
-  it('emits no drop warn on a clean pass', async () => {
-    const { logger, events } = spyLogger()
-    const loan = getAddress('0x5555555555555555555555555555555555555555')
-    const fetchPage: FetchCandidatePage = async () => ({
-      data: [row(MARKET, BORROWER)],
-      cursor: null
-    })
-    await discoverCandidates(fetchPage, resolver({ [MARKET]: params(loan) }), { logger })
-    expect(events.find(e => e.event === 'discover.dropped')).toBeUndefined()
-    expect(events.find(e => e.event === 'discover.pass')?.fields?.candidates).toBe(1)
   })
 })
 

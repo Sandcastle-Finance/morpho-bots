@@ -85,7 +85,7 @@ export async function discoverBorrowerIds(
   let cursor: string | null = null
   let complete = true
 
-  for (let pages = 0; ; ) {
+  for (let pages = 0; ;) {
     const page: CursorPage<unknown> = await fetchPage(cursor)
     pages += 1
     rawRows += page.data.length

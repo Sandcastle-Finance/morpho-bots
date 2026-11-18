@@ -1,17 +1,15 @@
 import type { KernelHead } from '@repo/kernel'
-import type { SwapPlan, Venue } from '@repo/swaps'
-import type { Address, Hex } from 'viem'
+import type { Venue } from '@repo/swaps'
+import type { Hex } from 'viem'
 
 import { runIdAt } from '@repo/controller'
 import {
   assertContractDeployed,
-  buildIdentityFromEnv,
   createBalanceMonitor,
   createDeploylessClient,
   createHeartbeatMonitor,
   createJournalFileSink,
   createLogger,
-  parseJournalRunCapBytes,
   simulateLiquidationExec,
   withLogging
 } from '@repo/kit'
@@ -28,38 +26,32 @@ import { join } from 'node:path'
 import { erc20Abi } from 'viem'
 import { getBalance, readContract } from 'viem/actions'
 
-import type { MarketParams } from './market'
-
 import { loadConfig } from './config'
 import { createApiCandidateSource, discoverCandidates } from './discovery/borrowers'
 import { CandidatesApiRefusedError } from './errors'
-import { encodeLiquidationExec } from './execution/encode-call'
+import { describeFailure } from './failure'
+import { LIQUIDATOR_GRAPH } from './graph'
 import { liquidatorAccount, liquidatorKernel } from './kernel'
 import { composeQuoting } from './quotes'
 import { revertReason } from './revert.utils'
 import { startLiquidator } from './run'
+import { liquidatorSettings } from './settings'
 import { readBlueLiquidationLens } from './state/lens.sol'
 import { createMarketParamsResolver, multicallIdToMarketParams } from './state/market-params'
 import { createTickStats } from './stats'
 import { superviseKernelBot } from './supervise'
 
-/** How long a route authorizes liquidations before its position is quoted again. */
-const QUOTE_VALID_MS = 30_000
-/** How long a position whose quote failed, or found no path, waits to be quoted again. */
-const QUOTE_RETRY_MS = 10_000
-/** How many positions are worked at once, preparing or in flight; swap venues are rate limited. */
-const POSITIONS_AT_ONCE = 3
 const JOURNAL_CAPACITY_BYTES = 16 * 1024 * 1024
 async function main() {
   const config = loadConfig()
-  const build = buildIdentityFromEnv(process.env)
-  const runCapBytes = parseJournalRunCapBytes(process.env.JOURNAL_RUN_CAP_BYTES)
+  const { build, runCapBytes } = config.kernel.journal
   const logger = createLogger(config.logLevel, {
     context: { bot: 'blue-liquidation', chainId: config.chainId, ...build }
   })
 
   const account = liquidatorAccount(config)
   const eoa = account.address
+  const settings = liquidatorSettings(config, { account: eoa, runId: runIdAt(Date.now()) })
 
   logger.info('startup', {
     chainId: config.chainId,
@@ -73,7 +65,7 @@ async function main() {
     client,
     config.executooorAddress,
     'EXECUTOOOR_ADDRESS',
-    'deploy it with `pnpm --filter @repo/contracts run deploy:executor`'
+    'deploy it with `bun run --filter @repo/contracts deploy:executor`'
   )
   await assertContractDeployed(client, config.morpho, 'Morpho singleton')
 
@@ -160,24 +152,6 @@ async function main() {
     logger
   })
 
-  // The exec calldata for one liquidation — the same bytes the preparation simulates and the kernel
-  // validates, simulates again at its head, and signs.
-  const encodeExec = (
-    market: MarketParams,
-    borrower: Address,
-    seizedAssets: bigint,
-    swapPlan: SwapPlan
-  ): Hex =>
-    encodeLiquidationExec({
-      executor: config.executooorAddress,
-      morpho: config.morpho,
-      market,
-      seizedAssets,
-      borrower,
-      plan: swapPlan,
-      recipient: eoa
-    })
-
   // Borrower discovery: poll the Morpho API's liquidation candidates (cursor-paginated, listed
   // markets only, over-inclusive by health-factor cutoff). Only (marketId, borrower) is consumed —
   // the market's immutable params are recovered onchain via idToMarketParams(id) and cached (params
@@ -227,16 +201,19 @@ async function main() {
       logger: logger.layer,
       lens: 'blue-liquidation'
     })
-  const kernel = liquidatorKernel({ config, account, logger })
+  const kernel = liquidatorKernel(settings, { config, account, logger })
   const journal = await createJournalFileSink({
     directory: join(config.kernel.stateDirectory, 'journal'),
-    graph: 'blue-liquidation',
+    graph: LIQUIDATOR_GRAPH,
     build,
     capacityBytes: JOURNAL_CAPACITY_BYTES,
-    runCapBytes
+    runCapBytes,
+    runId: settings.runId,
+    settings,
+    describe: describeFailure
   })
   logger.info('journal.pruned', journal.pruned)
-  const running = await startLiquidator({
+  const running = await startLiquidator(settings, {
     journal: journal.journal,
     kernel: kernel.live,
     world: {
@@ -244,25 +221,9 @@ async function main() {
       readLens,
       onHead: head => void balanceMonitor.maybeLog(BigInt(head.number))
     },
-    worldValidMs: config.worldValidMs,
-    quotes: { quoteFor, validForMs: QUOTE_VALID_MS, retryMs: QUOTE_RETRY_MS },
-    prepare: {
-      executor: config.executooorAddress,
-      encode: encodeExec,
-      simulate: data =>
-        simulateLiquidationExec(client, { executooor: config.executooorAddress, eoa, data })
-    },
-    venue: {
-      concurrency: POSITIONS_AT_ONCE,
-      budget: { calls: config.quoting.httpRps, perMs: 1_000 }
-    },
-    simulations: POSITIONS_AT_ONCE,
-    backoff: {
-      baseBlocks: Number(config.quoting.backoffBaseBlocks),
-      maxBlocks: Number(config.quoting.backoffMaxBlocks)
-    },
-    runId: runIdAt(Date.now()),
-    maxReservations: POSITIONS_AT_ONCE,
+    quoteFor,
+    simulate: data =>
+      simulateLiquidationExec(client, { executooor: config.executooorAddress, eoa, data }),
     stats: createTickStats(),
     logger
   })

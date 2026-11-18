@@ -29,12 +29,12 @@ liquidation. Around them:
 
 ## Prerequisites
 
-- **pnpm** `11.11.0` (via corepack) and **Node** `24.22.1` (`.nvmrc`).
+- **Bun** `1.4.4` (package manager) and **Node** `24.22.3` (`.nvmrc`).
 - A chain RPC that both reads and _relays_ transactions — **not** `rpc.morpho.dev/realtime`, which
   acknowledges sends but never broadcasts them.
 - A **funded EOA** (native gas) — the liquidator and the recipient of the end-of-exec token sweeps.
 - The generic **Executor** singleton deployed on each chain the bot runs on
-  (`pnpm --filter @repo/contracts run deploy:executor`). The bot derives its CREATE2 address and
+  (`bun run --cwd packages/contracts deploy:executor`). The bot derives its CREATE2 address and
   refuses to start if it holds no code.
 - At least one enabled **swap venue** — a `ZEROX_API_KEY` / `ONEINCH_API_KEY` / `LIFI_API_KEY`, or
   `ENABLE_LIFI=true` (LiFi routes keyless; its key only raises rate limits). A venue-less deployment
@@ -110,7 +110,7 @@ export MAX_FEE_GWEI=… FINALITY_8453=safe
 export KERNEL_STATE_DIR=./state KERNEL_ENROLLMENT=enrolling   # `enrolled` once ./state holds the ledger
 export JOURNAL_RUN_CAP_BYTES=1073741824
 export BUILD_REVISION=$(git rev-parse HEAD) BUILD_IMAGE_TAG=local
-pnpm --filter @morpho-org/blue-liquidation run start
+bun run --cwd bots/blue-liquidation start
 ```
 
 `prestart` builds this bot and its workspace dependencies (soltag-compiles `@repo/contracts` and
@@ -136,7 +136,7 @@ else. `RPC_URL_4663` is optional
 locally because Compose defaults Robinhood to its public RPC. Robinhood defaults to detection-only
 (`ALLOW_DETECTION_ONLY_4663` defaults true) and takes chainId-suffixed venue inputs
 (`ZEROX_API_KEY_4663` etc.) so arming Base never silently arms it. The build context is the repo
-root so the pnpm workspace resolves.
+root so the Bun workspace resolves.
 
 ## Deploying
 
@@ -144,17 +144,17 @@ The bot runs on the AWS tools Kubernetes cluster, one StatefulSet per chain, dep
 from the chart at [`helm/blue-liquidation`](./helm/blue-liquidation). The Argo CD applications live
 in morpho-infra:
 
-- `dev-8453` follows `bots` main and takes its `env` and `replicas` from morpho-tools-deployment's
+- `dev-8453` follows `bots` main and takes its `env` and `replicas` from the deployment config's
   `values-dev-<chain>.yaml`.
-- `prd-8453` and `prd-4663` take values files from morpho-tools-deployment and render the chart from
+- `prd-8453` and `prd-4663` take values files from the deployment config and render the chart from
   the public `morpho-bots` snapshot. The platform team owns their `replicas`, the production kill
-  switch, in morpho-infra; a `replicas` value in morpho-tools-deployment has no effect.
+  switch, in morpho-infra; a `replicas` value in the deployment config has no effect.
 
 Every push to main publishes `bots/blue-liquidation:<commit>` to ECR, built with
 `BUILD_REVISION=<commit>`. A `Releases blue-liq` release's `Image` job adds the tag
-`blue-liq-<PR#>` to that image. Production pins only a release tag, never a commit tag, in
-morpho-tools-deployment, and a pin merges only after its release's `Image` job succeeded: a pin to a
-tag with no image takes the bot offline. Rollback pins an earlier release tag.
+`blue-liq-<PR#>` to that image. Production pins only a release tag, never a commit tag, in the
+deployment config, and a pin merges only after its release's `Image` job succeeded: a pin to a tag
+with no image takes the bot offline. Rollback pins an earlier release tag.
 
 ### Release values
 
@@ -215,6 +215,16 @@ stop as SIGTERM: `kernel.stopped`, exit 0, and Kubernetes starts it again on a n
 total at most three caps and the live file overshoots its cap only by the entries its stop drains,
 so the journal holds at most about four caps: 4 GiB at the chart's 1 GiB, inside `10Gi`. The ledger
 is never pruned.
+
+Each journal file's header records the run id that names the run's intents, and the settings the
+bot built its graph from, kernel bounds included but never a key or a credential. With the build
+that wrote it, the file alone rebuilds that graph and replays the run (`src/replay.ts`).
+
+A failure that stopped the run is journaled with a code naming its error's class, such as
+`lane_overflow`, or `unknown` (`src/failure.ts`), never the error's text.
+
+To get a run's journal after an incident, ask Platform to follow
+[Copy a run's journal off a bot pod](../../docs/JOURNAL-RETRIEVAL.md).
 
 `KERNEL_ENROLLMENT` is `enrolling` for the first start of an account with no ledger and `enrolled`
 for every start after it. The kernel refuses an enrollment over an existing ledger and an enrolled
@@ -455,6 +465,11 @@ per world reading (`discover.*`, `lens.read`, `source.read`, `tick.end`, `tick.e
 `kernel.stopped`, `runner.failed`), or process/config (`startup`, `shutdown`, `quoting.*`,
 `discovery.*`, `signer.*`, `heartbeat.*`, `pendle.*`).
 
+The `live.*` lines (`live.graph`, `live.flow`, `live.record`, `live.snapshot`, `live.gap`) are the
+live log (`declareLiveLog` in `@repo/kit`): the graph's nodes and edges, and what changed in it at
+each step, read back by the live view. They name nodes, keys and statuses, and show only the values
+of `liquidations.phase` and `kernel.health`. They are a versioned protocol between kit and the live view, not an operator log.
+
 #### Changes from the pre-kernel bot
 
 For queries and dashboards written against the bot before it ran on the kernel:
@@ -475,12 +490,12 @@ For queries and dashboards written against the bot before it ran on the kernel:
 
 ## Testing
 
-- `pnpm test` — unit tests for the math, LIF, seize-exact planner (incl. the underflow-safety sweep),
+- `bun run test` — unit tests for the math, LIF, seize-exact planner (incl. the underflow-safety sweep),
   the id derivation, API discovery (parsing, cursor pagination, retry semantics), config (incl. venue
   inference and the zero-venue gate), eligibility, quoting, venues, the exec encoder against the
   shared validator, the world read and the preparation, and acceptance scenarios that run the whole
   graph and its kernel against a fake chain, including a burst measured in settlements per block.
-- **Live read-path probe** — `pnpm --filter @morpho-org/blue-liquidation run probe:lens` (needs
+- **Live read-path probe** — `bun run --cwd bots/blue-liquidation probe:lens` (needs
   `RPC_URL`, no anvil) runs the deployless lens against a sample of real Base borrowers, prints a
   valid/hasDebt/healthy/liquidatable breakdown + a decoded sample. Run it any time to confirm the read
   path against production (last run: 256/256 returned, all valid, 0 liquidatable — a healthy market).

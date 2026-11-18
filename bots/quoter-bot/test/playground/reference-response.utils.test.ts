@@ -56,12 +56,6 @@ describe('ladderReferenceBand', () => {
     })
   })
 
-  test('never has to omit the band: the parser rejects a shape that fits at no reference', () => {
-    expect(() => ladder({ spreadBps: '800', stepBps: '400' })).toThrow(
-      'full ladder shape cannot fit in the hard range'
-    )
-  })
-
   test('widens the band as the ladder reaches less far from its center', () => {
     const narrow = ladderReferenceBand(ladder({ spreadBps: '100', stepBps: '50', rungCount: '1' }))
     expect(narrow).toEqual({ lowestRateBps: '250', highestRateBps: '750', contiguous: true })

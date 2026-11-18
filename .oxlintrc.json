@@ -31,6 +31,7 @@
       }
     ],
     "import/no-default-export": "error",
+    "import/no-unassigned-import": ["error", { "allow": ["server-only"] }],
     "typescript/only-throw-error": "error",
     "typescript/prefer-promise-reject-errors": "error",
     "complexity": "error",
@@ -67,14 +68,19 @@
     "**/build",
     "**/coverage",
     "**/generated",
-    "pnpm-lock.yaml",
+    "bun.lock",
     "**/*.cjs",
     "**/*.mjs",
     "**/*.js"
   ],
   "overrides": [
     {
-      "files": ["**/vitest.config.ts", "packages/oxlint-plugin/src/index.ts"],
+      "files": [
+        "**/vitest.config.ts",
+        "packages/oxlint-plugin/src/index.ts",
+        "tools/realtime-app/app/**/page.tsx",
+        "tools/realtime-app/app/**/layout.tsx"
+      ],
       "rules": {
         "import/no-default-export": "off"
       }

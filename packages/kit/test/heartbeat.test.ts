@@ -61,14 +61,14 @@ describe('createHeartbeatMonitor', () => {
     const { logger } = captureLogger()
     const urls: string[] = []
     let callback: (() => void) | undefined
-    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
-      ...args: Parameters<typeof setInterval>
-    ) => {
-      const [handler, delay] = args
-      callback = handler as () => void
-      expect(delay).toBe(60_000)
-      return 1 as unknown as ReturnType<typeof setInterval>
-    }) as typeof setInterval)
+    const setIntervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation((...args: Parameters<typeof setInterval>) => {
+        const [handler, delay] = args
+        callback = handler
+        expect(delay).toBe(60_000)
+        return 1 as unknown as ReturnType<typeof setInterval>
+      })
     const monitor = createHeartbeatMonitor({
       url: 'https://uptime.betterstack.com/api/v1/heartbeat/secret',
       logger,
@@ -161,9 +161,7 @@ describe('createHeartbeatMonitor', () => {
     const { logger } = captureLogger()
     const setIntervalSpy = vi
       .spyOn(globalThis, 'setInterval')
-      .mockImplementation(
-        (() => 1 as unknown as ReturnType<typeof setInterval>) as typeof setInterval
-      )
+      .mockImplementation(() => 1 as unknown as ReturnType<typeof setInterval>)
     const urls: string[] = []
     const monitor = createHeartbeatMonitor({
       url,

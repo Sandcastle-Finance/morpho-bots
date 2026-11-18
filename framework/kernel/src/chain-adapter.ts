@@ -9,6 +9,33 @@ const LOOKUPS_PER_POLL = 4
 /** Header reads one walk keeps in flight: a fast chain's poll gap or first window spans many blocks. */
 const HEADER_READS_AT_ONCE = 32
 
+/**
+ * Tip reads one poll keeps in flight, so each read's deadline starts once it is sent rather than
+ * while it waits behind a rate-limited transport.
+ */
+const TIP_READS_AT_ONCE = 32
+
+/**
+ * Reads `items` in waves started together and delivers each result in order, until one returns
+ * false; a wave's reads settle before it returns, so none outlives the poll that started it.
+ */
+const inWaves = async <T, R>(
+  items: readonly T[],
+  read: (item: T) => Promise<R>,
+  deliver: (item: T, result: R) => boolean | Promise<boolean>
+) => {
+  for (let start = 0; start < items.length; start += TIP_READS_AT_ONCE) {
+    const wave = items.slice(start, start + TIP_READS_AT_ONCE)
+    const results = wave.map(read)
+    for (const [i, item] of wave.entries())
+      if (!(await deliver(item, await results[i]!))) {
+        await Promise.allSettled(results.slice(i + 1))
+        return false
+      }
+  }
+  return true
+}
+
 /** A `Reorg` below every height: the kernel drops all evidence and re-learns it from the chain. */
 const NO_SURVIVING_HEIGHT = -1
 
@@ -352,7 +379,10 @@ export const createChainAdapter = (options: ChainAdapterOptions) => {
       : nonce
   }
 
-  /** Reads pinned to one tip; they stop as soon as that tip is no longer the one delivered. */
+  /**
+   * Reads pinned to one tip, sent in bounded waves after the nonce and delivered in poll order;
+   * delivery stops as soon as that tip is no longer the one delivered.
+   */
   const readAtTip = async () => {
     const at = tip
     if (!at) return
@@ -363,22 +393,36 @@ export const createChainAdapter = (options: ChainAdapterOptions) => {
     if (!current()) return
     if (nonce) dispatch({ type: 'NonceAt', ...pinned, ...nonce })
     const watched = pollSet(state())
-    for (const hash of watched.receipts) {
-      const found = await attempt('receipt', () => chain.receipt(hash))
-      if (!current()) return
-      if (!found) continue
-      if (!(await deliverVouched(found.block, current, { type: 'Receipt', hash, ...found }))) return
-    }
-    for (const id of watched.commitments) {
-      const observed = await attempt('commitment', () => chain.commitment(id, at))
-      if (!current()) return
-      if (observed) dispatch({ type: 'CommitmentObserved', id, ...pinned, ...observed })
-    }
-    for (const resource of options.config.observedResources) {
-      const amount = await attempt('capacity', () => chain.capacity(resource, at))
-      if (!current()) return
-      if (amount !== undefined) dispatch({ type: 'Capacity', resource, amount, ...pinned })
-    }
+    const receipts = await inWaves(
+      watched.receipts,
+      hash => attempt('receipt', () => chain.receipt(hash)),
+      (hash, found) => {
+        if (!current()) return false
+        if (!found) return true
+        return deliverVouched(found.block, current, { type: 'Receipt', hash, ...found })
+      }
+    )
+    if (!receipts) return
+    const commitments = await inWaves(
+      watched.commitments,
+      id => attempt('commitment', () => chain.commitment(id, at)),
+      (id, observed) => {
+        if (!current()) return false
+        if (observed) dispatch({ type: 'CommitmentObserved', id, ...pinned, ...observed })
+        return true
+      }
+    )
+    if (!commitments) return
+    const capacities = await inWaves(
+      options.config.observedResources,
+      resource => attempt('capacity', () => chain.capacity(resource, at)),
+      (resource, amount) => {
+        if (!current()) return false
+        if (amount !== undefined) dispatch({ type: 'Capacity', resource, amount, ...pinned })
+        return true
+      }
+    )
+    if (!capacities) return
     await readLookups(current)
   }
 

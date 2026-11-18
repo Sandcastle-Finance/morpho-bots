@@ -36,13 +36,10 @@ export const resolverKernel = (options: {
 }) => {
   const { config, mode, account, logger } = options
   return transactionKernelSpec({
+    settings: mode.kernel,
     limits: {
-      chainId: config.chainId,
       targets: [config.resolver],
       selector: RESOLVE_SELECTOR,
-      maxFeePerGasWei: mode.maxFeePerGasWei,
-      maxSpendWei: mode.maxSpendWei,
-      maxGasLimit: mode.maxGasLimit,
       stuckMs: STUCK_MS,
       maxEvidenceAgeBlocks: maxEvidenceAgeBlocks(config)
     },
@@ -55,10 +52,7 @@ export const resolverKernel = (options: {
     }),
     rpcUrl: config.rpcUrl,
     rpcUrlFallback: config.rpcUrlFallback,
-    stateDirectory: mode.kernel.stateDirectory,
-    enrollment: mode.kernel.enrollment,
     effectTimeoutMs: KERNEL_EFFECT_TIMEOUT_MS,
-    finality: mode.finality,
     logger
   })
 }

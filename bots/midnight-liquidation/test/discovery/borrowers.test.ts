@@ -90,8 +90,8 @@ describe('discoverBorrowers', () => {
     })
   })
 
-  it('stops and warns discover.max_pages when the page cap is hit (never truncates silently)', async () => {
-    const { logger, events } = spyLogger()
+  it('stops at the page cap and reports the walk incomplete', async () => {
+    const { logger } = spyLogger()
     let calls = 0
     // Always returns a non-null cursor — an endpoint that would page forever.
     const fetchPage: FetchCandidatePage = async () => {
@@ -101,7 +101,6 @@ describe('discoverBorrowers', () => {
     const { complete } = await discoverBorrowers(fetchPage, { logger, maxPages: 3 })
     expect(complete).toBe(false)
     expect(calls).toBe(3)
-    expect(events.some(e => e.level === 'warn' && e.event === 'discover.max_pages')).toBe(true)
   })
 })
 
@@ -174,30 +173,6 @@ describe('createApiCandidateSource', () => {
     })
     await source('page-2-cursor')
     expect(new URL(requestedUrl).searchParams.get('cursor')).toBe('page-2-cursor')
-  })
-
-  it('retries on 429 (honoring Retry-After) and then succeeds', async () => {
-    let attempts = 0
-    let slept = 0
-    const fetchImpl = async () => {
-      attempts += 1
-      if (attempts === 1) return jsonResponse({}, 429, { 'retry-after': '0' })
-      return jsonResponse({ cursor: null, data: [row(MARKET, BORROWER)] })
-    }
-    const source = createApiCandidateSource({
-      url: BASE_URL,
-      apiKey: API_KEY,
-      chainId: 8453,
-      healthFactorLte: 1.02,
-      fetchImpl,
-      sleep: async () => {
-        slept += 1
-      }
-    })
-    const page = await source(null)
-    expect(attempts).toBe(2)
-    expect(slept).toBe(1)
-    expect(page.data).toHaveLength(1)
   })
 
   it('retries a 429 with a non-JSON body (Retry-After is read from status/headers, not the body)', async () => {

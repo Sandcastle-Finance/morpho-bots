@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { BaseError } from 'viem'
 
 import type { Finality } from './kernel-chain'
+import type { KernelSettings } from './kernel-settings'
 import type { BotLogger } from './logger'
 
 import { blocksFor } from './block-time'
@@ -21,7 +22,7 @@ import { createAccountSigner } from './signer'
  * resolves, and one per act not yet at a nonce, each the per-transaction spend ceiling.
  */
 export const TRANSACTION_KERNEL_RESERVATIONS = 4
-const POLL_MS = 2_000
+export const TRANSACTION_KERNEL_POLL_MS = 2_000
 /**
  * How far below the head blocks are retained; finality must lag less, or the kernel refuses to
  * start. Base's `safe` block lags 5 minutes while its batcher stalls.
@@ -33,6 +34,15 @@ const MIN_REORG_DEPTH_BLOCKS = 128
 /** How many blocks below the head a kernel bot on `chain` retains. */
 export const reorgDepthFor = (chain: Pick<Chain, 'id'>) =>
   blocksFor(REORG_WINDOW_MS, chain, MIN_REORG_DEPTH_BLOCKS)
+
+/** Refuses a finality depth that the blocks {@link reorgDepthFor} keeps on `chain` cannot reach. */
+export const assertFinalityInWindow = (chain: Pick<Chain, 'id'>, finality: Finality) => {
+  if (typeof finality !== 'object') return
+  const window = reorgDepthFor(chain)
+  if (finality.depth >= window)
+    throw new FinalityBeyondWindowError(chain.id, finality.depth, window)
+}
+
 /** How old a simulation may be at the head, though never under 3 blocks on a slow chain. */
 const MAX_SIM_LAG_MS = 6_000
 const MIN_SIM_LAG_BLOCKS = 3
@@ -106,32 +116,34 @@ export const transactionKernelConfig = (
 })
 
 /**
- * The live kernel for a transaction-only bot's account: its ledger under `stateDirectory`, chain
- * reads and effects over viem, and every transaction it signs also checked by the signer's policy,
- * which pins `targets` and `selector`.
+ * The live kernel for a transaction-only bot's account: its ledger under the settings' state
+ * directory, chain reads and effects over viem, and every transaction it signs also checked by the
+ * signer's policy, which pins `targets` and `selector`.
  */
 export const transactionKernelSpec = (parameters: {
-  limits: TransactionKernelLimits
+  settings: Omit<KernelSettings, 'journal'>
+  limits: Pick<TransactionKernelLimits, 'targets' | 'selector' | 'stuckMs' | 'maxEvidenceAgeBlocks'>
   validator: Validator
   account: LocalAccount
   chain: Chain
   client: Client
   rpcUrl: string
   rpcUrlFallback?: string | undefined
-  stateDirectory: string
-  enrollment: 'enrolled' | 'enrolling'
   effectTimeoutMs: number
-  finality: Finality
   logger: BotLogger
 }): Readonly<{ live: TransactionKernelOptions }> => {
-  const { limits, account, client, logger } = parameters
-  const reorgDepth = reorgDepthFor(parameters.chain)
-  const { finality } = parameters
-  if (typeof finality === 'object' && finality.depth >= reorgDepth)
-    throw new FinalityBeyondWindowError(limits.chainId, finality.depth, reorgDepth)
+  const { settings, account, client, logger, chain } = parameters
+  assertFinalityInWindow(chain, settings.finality)
+  const limits: TransactionKernelLimits = {
+    ...parameters.limits,
+    chainId: chain.id,
+    maxFeePerGasWei: settings.maxFeePerGasWei,
+    maxSpendWei: settings.maxSpendWei,
+    maxGasLimit: settings.maxGasLimit
+  }
   const signer = createAccountSigner({
     account,
-    chain: parameters.chain,
+    chain,
     rpcUrl: parameters.rpcUrl,
     rpcUrlFallback: parameters.rpcUrlFallback,
     policy: {
@@ -146,22 +158,17 @@ export const transactionKernelSpec = (parameters: {
     logger
   })
   const live: TransactionKernelOptions = {
-    config: transactionKernelConfig(
-      limits,
-      parameters.chain,
-      account.address,
-      parameters.validator
-    ),
+    config: transactionKernelConfig(limits, chain, account.address, parameters.validator),
     store: createLedgerStore(
       join(
-        parameters.stateDirectory,
+        settings.stateDirectory,
         `kernel-${limits.chainId}-${account.address.toLowerCase()}.json`
       )
     ),
     chain: createKernelChain({
       client,
       account: account.address,
-      finality: parameters.finality,
+      finality: settings.finality,
       commitment: () => Promise.reject(new NoCommitmentsError([]))
     }),
     effects: createKernelEffects({
@@ -172,10 +179,10 @@ export const transactionKernelSpec = (parameters: {
       materialize: () => Promise.reject(new NoCommitmentsError([])),
       logger
     }),
-    enrollment: parameters.enrollment,
-    pollMs: POLL_MS,
+    enrollment: settings.enrollment,
+    pollMs: TRANSACTION_KERNEL_POLL_MS,
     effectTimeoutMs: parameters.effectTimeoutMs,
-    reorgDepth,
+    reorgDepth: reorgDepthFor(chain),
     onError: (source, error) =>
       logger.warn('kernel.error', {
         source,

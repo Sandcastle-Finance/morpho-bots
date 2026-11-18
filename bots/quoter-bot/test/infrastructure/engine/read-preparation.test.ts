@@ -31,7 +31,7 @@ const reads = (overrides: Partial<WorldReads> = {}): WorldReads => ({
     }
   ],
   readBook: async () => [],
-  readPosition: async () => {
+  readPositions: async () => {
     throw new Error('preparations read no position')
   },
   readCash: async () => {
@@ -118,6 +118,19 @@ describe('readPreparation', () => {
     await expect(prepare(malformed, BootstrapAdapterError)).rejects.toMatchObject({
       name: 'BootstrapAdapterError',
       operation: 'book-response'
+    })
+  })
+
+  test('fails on a market it cannot read, named as the preparing strategy', async () => {
+    const unavailable = reads({
+      readMarket: async () => {
+        throw new LadderAdapterError('position-unavailable')
+      }
+    })
+
+    await expect(prepare(unavailable, BootstrapAdapterError)).rejects.toMatchObject({
+      name: 'BootstrapAdapterError',
+      operation: 'position-unavailable'
     })
   })
 

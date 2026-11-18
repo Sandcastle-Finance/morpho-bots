@@ -1,0 +1,27 @@
+{
+  "name": "@repo/journal",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "bin": {
+    "journal": "./src/bin.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/engine": "workspace:*",
+    "@repo/kit": "workspace:*",
+    "@repo/utils": "workspace:*",
+    "solc": "catalog:",
+    "soltag": "catalog:",
+    "tsx": "catalog:"
+  },
+  "devDependencies": {
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

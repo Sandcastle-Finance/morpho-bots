@@ -117,7 +117,7 @@ jobs:
         env:
           DOCKERHUB_OIDC_CONNECTIONID: ${{ secrets.DOCKERHUB_OIDC_CONNECTIONID }}
           # The exchanged access token must outlive the image build that runs between login and
-          # push; the 300s default is shorter than this pnpm install + workspace build.
+          # push; the 300s default is shorter than this bun install + workspace build.
           DOCKERHUB_OIDC_EXPIREIN: '1800'
         with:
           username: ${{ vars.DOCKER_USERNAME }}

@@ -10,7 +10,17 @@ import type {
   Stream
 } from '@repo/engine'
 
-import { emitTo, every, GraphDefinitionError, lane, sourceWrite, watch } from '@repo/engine'
+import {
+  emitTo,
+  every,
+  GraphDefinitionError,
+  JournalFailedError,
+  JournalIoTimeoutError,
+  JournalOverflowError,
+  lane,
+  sourceWrite,
+  watch
+} from '@repo/engine'
 
 import type { KernelChain } from './chain-adapter'
 import type { KernelEffects, ExecutorPort } from './executor'
@@ -26,10 +36,11 @@ import type {
 } from './types'
 
 import { createChainAdapter } from './chain-adapter'
-import { KernelJournalRequiredError } from './errors'
+import { KernelConfigError, KernelJournalRequiredError } from './errors'
 import { createExecutor } from './executor'
 import { createKernel } from './kernel'
 import { OBSERVING, observeActivity, observeNode, observeRequest } from './observe'
+import { hostOptionsDefect } from './validation'
 
 type StartEvent = Extract<KernelEvent, { type: 'Start' }>
 type TickEvent = Extract<KernelEvent, { type: 'Tick' }>
@@ -56,6 +67,8 @@ export type KernelHead = Readonly<{ number: number; hash: Hash }>
 
 export type KernelNodes = Readonly<{
   requests: Source<KernelRequest, 'occurrence'>
+  /** The kernel's poll clock, a member of its recovery scope, so it stops once the graph degrades. */
+  tick: Stream<TickEvent>
   state: State<KernelState>
   commands: Stream<Command>
   activity: Stream<readonly KernelActivity[]>
@@ -108,6 +121,8 @@ const partsOf = (options: Hosting): Parts => {
       // A throwing error hook must not wedge the event loop.
     }
   }
+  const defect = hostOptionsDefect(options)
+  if (defect) throw new KernelConfigError(defect)
   const kernel = createKernel(options.config)
   return {
     kernel,
@@ -183,7 +198,7 @@ const declareFolds = (
     applyInput: (observing, input) => {
       if (input.from === 'activity') return { state: observeActivity(observing, input.value) }
       if (!input.from.startsWith('fact')) {
-        const next = observeRequest(observing, input.value as KernelEvent)
+        const next = observeRequest(observing, input.value)
         return { state: next.state, emit: [emitTo(observed, next.request)] }
       }
       const node = facts[Number(input.from.slice(4))]!.id
@@ -294,14 +309,62 @@ const declareEffects = (
   })
 }
 
+const CAUSE_DEPTH = 4
+const ERRNO_CODES: ReadonlySet<string> = new Set([
+  'EACCES',
+  'EAGAIN',
+  'EBADF',
+  'EDQUOT',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'ENOENT',
+  'ENOSPC',
+  'EPERM',
+  'EROFS',
+  'ETIMEDOUT'
+])
+
+/**
+ * Why the journal failed, as one of a fixed set of codes: an overflow, a timed-out write, the errno
+ * a cause carries, else `io`. A property that throws reads as `io`.
+ */
+const journalCode = (error: JournalFailedError) => {
+  try {
+    let link: unknown = error.cause
+    for (let depth = 1; depth < CAUSE_DEPTH && link instanceof Error; depth++) {
+      if (link instanceof JournalIoTimeoutError) return 'io_timeout'
+      const code: unknown = (link as { code?: unknown }).code
+      if (typeof code === 'string' && ERRNO_CODES.has(code)) return code
+      link = link.cause
+    }
+    return 'io'
+  } catch {
+    return 'io'
+  }
+}
+
+/**
+ * The reason a kernel halts on a failure outside it: where it failed, plus a code for the cases the
+ * kernel knows, its journal's. Nothing is read from the error as text, so data never shapes it.
+ */
+const haltReason = (error: unknown, origin: string) => {
+  try {
+    if (error instanceof JournalOverflowError) return `${origin} failed: overflow`
+    if (error instanceof JournalFailedError) return `${origin} failed: ${journalCode(error)}`
+    return `${origin} failed`
+  } catch {
+    return `${origin} failed`
+  }
+}
+
 /** Halts a kernel that is acting when anything outside it fails, withdrawing what it holds. */
 const haltOn =
   (state: State<KernelState>, requests: Source<KernelRequest, 'occurrence'>) =>
   (error: unknown, origin: string, read: <T>(node: Node<T>) => T | undefined) => {
     const lifecycle = read(state)?.lifecycle.kind
     if (lifecycle === undefined || lifecycle === 'idle' || lifecycle === 'stopped') return undefined
-    const name = error instanceof Error ? error.name : 'unknown'
-    return [sourceWrite(requests, { type: 'Halt', reason: `${origin} failed: ${name}` })]
+    return [sourceWrite(requests, { type: 'Halt', reason: haltReason(error, origin) })]
   }
 
 /** Pushes `Start` with the stored ledger, then starts the poll clock unless the kernel stopped. */
@@ -361,10 +424,10 @@ export const declareKernelHost = (g: GraphBuilder, options: Hosting) => {
     { recovery: ({ nodes, reserved }) => haltOn(reserved.state, nodes.requests) }
   )
   const state = reserved.state
-  const { start, requests, commands, activity, heads } = nodes
+  const { start, requests, tick, commands, activity, heads } = nodes
   let attached = false
   return {
-    nodes: { requests, state, commands, activity, heads } satisfies KernelNodes,
+    nodes: { requests, tick, state, commands, activity, heads } satisfies KernelNodes,
     start: starter(options, start, parts.adapter),
     attach: (inputs: Pick<KernelHostOptions, 'requests' | 'facts'>) => {
       if (attached) throw new GraphDefinitionError('the kernel is attached twice')

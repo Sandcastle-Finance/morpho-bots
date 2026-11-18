@@ -1,6 +1,6 @@
 {
   "name": "@morpho-org/quoter-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "license": "Apache-2.0",
   "bin": {
@@ -9,11 +9,10 @@
   "type": "module",
   "scripts": {
     "build": "tsx scripts/build.ts",
-    "jsdoc:build": "pnpm run jsdoc:check && typedoc --options typedoc.json",
     "jsdoc:check": "tsx scripts/check-jsdoc.ts",
-    "prenpm:pack": "pnpm --filter \"{.}...\" --if-present run build",
+    "prenpm:pack": "bun run --filter @repo/contracts build && bun run build",
     "npm:pack": "tsx scripts/pack-npm.ts",
-    "prestart": "pnpm --filter \"{.}...\" --if-present run build",
+    "prestart": "bun run --filter @repo/contracts build && bun run build",
     "playground:build": "node scripts/playground-build.mjs",
     "playground:serve": "node scripts/playground-serve.mjs",
     "playground:serve:test": "node --test scripts/playground-atomic-publish.test.mjs scripts/playground-build.test.mjs scripts/playground-process.test.mjs scripts/playground-serve.test.mjs",
@@ -23,13 +22,14 @@
     "playground:test": "node --test scripts/playground-atomic-publish.test.mjs scripts/playground-build.test.mjs scripts/playground-process.test.mjs scripts/playground-serve.test.mjs scripts/playground-smoke-suite.test.mjs scripts/playground-smoke.test.mjs",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
     "test:e2e": "vitest run test/e2e",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "soltag && tsc --noEmit"
   },
   "dependencies": {
     "@morpho-org/midnight-sdk": "catalog:",
     "@morpho-org/morpho-sdk": "5.7.0",
     "@morpho-org/morpho-ts": "catalog:",
     "@opentelemetry/api": "catalog:",
+    "@repo/contracts": "workspace:*",
     "@repo/controller": "workspace:*",
     "@repo/engine": "workspace:*",
     "@repo/kernel": "workspace:*",
@@ -43,11 +43,13 @@
     "commander": "15.0.0",
     "react": "catalog:",
     "react-dom": "catalog:",
+    "solc": "catalog:",
+    "soltag": "catalog:",
     "viem": "catalog:",
-    "yaml": "2.8.3"
+    "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-metrics": "2.11.0",
+    "@opentelemetry/sdk-metrics": "2.12.1",
     "@repo/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
@@ -55,7 +57,6 @@
     "esbuild": "catalog:",
     "execa": "catalog:",
     "tsx": "catalog:",
-    "typedoc": "0.28.20",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"

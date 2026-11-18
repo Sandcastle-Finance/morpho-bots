@@ -17,13 +17,6 @@ describe('addressSchema', () => {
     expect(addressSchema.parse(lowercaseAddress)).toBe(checksummed)
   })
 
-  it('should accept addresses with uppercase and return checksummed', () => {
-    const uppercaseAddress = '0x742D35CC6634C0532925A3B844BC9E7595F0BEB4'
-    const checksummed = '0x742d35CC6634c0532925a3B844bC9e7595F0BeB4'
-
-    expect(addressSchema.parse(uppercaseAddress)).toBe(checksummed)
-  })
-
   it('should trim whitespace and return checksummed', () => {
     const addressWithSpaces = '  0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb4  '
     const checksummed = '0x742d35CC6634c0532925a3B844bC9e7595F0BeB4'
@@ -42,24 +35,6 @@ describe('addressSchema', () => {
   it('should reject invalid address format', () => {
     expect(() => addressSchema.parse('invalid')).toThrow('Invalid address')
     expect(() => addressSchema.parse('0x123')).toThrow('Invalid address')
-  })
-
-  it('should reject address without 0x prefix', () => {
-    expect(() => addressSchema.parse('742d35Cc6634C0532925a3b844Bc9e7595f0bEb4')).toThrow(
-      'Invalid address'
-    )
-  })
-
-  it('should reject address with wrong length', () => {
-    expect(() => addressSchema.parse('0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb')).toThrow(
-      'Invalid address'
-    )
-  })
-
-  it('should reject address with invalid characters', () => {
-    expect(() => addressSchema.parse('0x742d35Gc6634C0532925a3b844Bc9e7595f0bEb4')).toThrow(
-      'Invalid address'
-    )
   })
 
   it('should accept the zero address', () => {

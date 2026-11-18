@@ -1,14 +1,13 @@
 import type { Hex } from 'viem'
 
-import { bytesToHex, hexToBytes } from 'viem'
 import { describe, expect, test } from 'vitest'
 
 import {
   acceptedLossFactorValue,
   parseAddress,
-  parseBytes32,
   referenceLookbackSecondsValue
 } from '../../src/config/config.utils'
+import { parseBytes32 } from '../../src/config/market-collections'
 import { MAX_LOSS_FACTOR } from '../../src/domain/loss-factor'
 
 describe('config viem parsing utilities', () => {
@@ -35,9 +34,7 @@ describe('config viem parsing utilities', () => {
   })
 
   test('canonicalizes mixed-case bytes32 values through viem', () => {
-    const mixedCase: Hex = `0x${'aB'.repeat(32)}`
-
-    expect(parseBytes32(mixedCase, 'ID')).toBe(bytesToHex(hexToBytes(mixedCase)))
+    expect(parseBytes32(`0x${'aB'.repeat(32)}`, 'ID')).toBe(`0x${'ab'.repeat(32)}`)
   })
 })
 

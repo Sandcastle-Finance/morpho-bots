@@ -51,7 +51,7 @@ export const bootstrapActiveGroups = (parameters: {
           id: group.id,
           marketId: groupMarketId,
           assets,
-          tick: group.tick as bigint,
+          tick: group.tick,
           maximumAssets: group.cap.maximum,
           offerCount: group.offers.length,
           continuousFeeCap: group.continuousFeeCap,

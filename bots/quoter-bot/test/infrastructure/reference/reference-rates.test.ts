@@ -153,7 +153,7 @@ describe('createReferenceRates', () => {
       ok: true,
       value: {
         mode: 'variable',
-        rateBps: ((WAD / 10n) * 31_536_000n * 10_000n) / 100_000n / WAD,
+        rateBps: 315_360n,
         observationId: 'hour:277'
       }
     })

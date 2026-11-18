@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
 import { inspectJSDocSource } from '../../scripts/check-jsdoc'
-import { JSDocValidationError } from '../../scripts/errors'
 
 const inspect = (source: string) => inspectJSDocSource('fixture.ts', source)
 
@@ -19,17 +18,6 @@ export interface Reader {
 `
 
 describe('JSDoc contract checker', () => {
-  test('uses a stable typed tooling failure with a safe violation count', () => {
-    const error = new JSDocValidationError(3)
-
-    expect(error).toBeInstanceOf(Error)
-    expect(error).toMatchObject({
-      name: 'JSDocValidationError',
-      failureCount: 3,
-      message: 'JSDoc contract coverage failed for 3 rules'
-    })
-  })
-
   test('accepts a substantive declaration with matching contract tags', () => {
     expect(inspect(valid).failures).toEqual([])
   })
