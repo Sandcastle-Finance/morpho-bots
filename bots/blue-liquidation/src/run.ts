@@ -2,6 +2,7 @@ import type { Runner, RunnerOptions } from '@repo/engine'
 import type { ReportCommand } from '@repo/kernel'
 
 import { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS } from '@repo/engine'
+import { createHealthMeter } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 
 import type { LiquidatorDeps } from './graph'
@@ -28,7 +29,12 @@ export const startLiquidator = async (
   try {
     declared = declareLiquidator(settings, { ...options, kernel: { ...options.kernel, now } })
     declared.live.describe(declared.graph)
-    runner = createRunner(declared.graph, { now, journal, observe: declared.live.observe })
+    runner = createRunner(declared.graph, {
+      now,
+      journal,
+      observe: declared.live.observe,
+      meter: createHealthMeter({ logger: options.logger, kernel: declared.kernel.nodes })
+    })
   } catch (error) {
     const finalized = await tryCatch(
       journal.sink.finalize(

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import type { Pruned } from './activity'
 import type {
   Candidate,
@@ -123,9 +125,11 @@ const initialState = (): KernelState => ({
   submissions: {}
 })
 
-/** The ledger's encoding apart from its sequence number, so it changes only with the content. */
-const durableText = (ledger: DurableLedger) =>
-  encodeLedger({ ...ledger, header: { ...ledger.header, seq: 0 } })
+/** The ledger's digest apart from its sequence number, so it changes only with the content. */
+const durableDigest = (ledger: DurableLedger) =>
+  createHash('sha256')
+    .update(encodeLedger({ ...ledger, header: { ...ledger.header, seq: 0 } }))
+    .digest('hex')
 
 /** Steps are taken in their stored form, so a restart re-reads exactly what was admitted and signed. */
 const UNSTORABLE = 'step does not survive the ledger codec'
@@ -374,7 +378,10 @@ export const createKernel = (config: KernelConfig) => {
     }
     if (cloned) handle(s, out, cloned)
     if (s.lifecycle.kind !== 'stopped') afterEvent(s, out)
-    if (event.type === 'Head') pruneHeaders(s)
+    if (event.type === 'Head') {
+      pruneHeaders(s)
+      pruneRetired(s)
+    }
     return {
       state: s,
       commands: structuredClone(out),
@@ -1676,6 +1683,7 @@ export const createKernel = (config: KernelConfig) => {
   const retire = (s: KernelState, entry: Entry, why: string, block: number) => {
     entry.state = 'retired'
     entry.retiredBy = why
+    entry.retiredAt = s.head?.number ?? 0
     entry.compensate = false
     raiseWatermark(s, Object.keys(entry.spec.resources), block)
   }
@@ -2048,7 +2056,7 @@ export const createKernel = (config: KernelConfig) => {
         s.releases[intentId] = { ...release, restored: true }
     }
     s.lifecycle = { kind: 'starting', since: event.now, nonceChecked: false }
-    s.lastDurable = durableText(toDurable(s, config))
+    s.lastDurable = durableDigest(toDurable(s, config))
   }
 
   const nonceAt = (
@@ -2644,7 +2652,7 @@ export const createKernel = (config: KernelConfig) => {
 
   /**
    * Drops terminal plans that nothing still names, so plans are bounded by live work rather than by
-   * history. Retired entries stay until restart (§15).
+   * history. Retired entries are {@link pruneRetired}'s.
    */
   const pruneFinished = (s: KernelState) => {
     const candidates = Object.values(s.nonces).flatMap(r => r.candidates)
@@ -2662,6 +2670,27 @@ export const createKernel = (config: KernelConfig) => {
       delete s.plans[id]
     }
     s.planOrder = s.planOrder.filter(id => s.plans[id] !== undefined)
+  }
+
+  /** Drops each retired entry past its retention window that no live plan or nonce names (§1). */
+  const pruneRetired = (s: KernelState) => {
+    const head = s.head?.number ?? 0
+    const window = Math.max(config.retiredRetentionBlocks, 1)
+    const working = Object.values(s.plans).filter(
+      p => p.status === 'executing' || p.status === 'compensating'
+    )
+    const namedIntents = new Set(working.map(p => p.intentId))
+    const namedIds = new Set([
+      ...working.flatMap(p => (p.recovery?.entry === undefined ? [] : [p.recovery.entry])),
+      ...Object.values(s.nonces).flatMap(r =>
+        r.candidates.flatMap(c => [...c.creates, ...c.exposes, ...c.retires])
+      )
+    ])
+    for (const [id, entry] of Object.entries(s.entries)) {
+      if (entry.state !== 'retired' || head - (entry.retiredAt ?? head) < window) continue
+      if (namedIntents.has(entry.intentId) || namedIds.has(id)) continue
+      delete s.entries[id]
+    }
   }
 
   /** A step's recorded bytes are worth re-sending while its plan executes, unexpired, in `running` (§6). */
@@ -2824,13 +2853,13 @@ export const createKernel = (config: KernelConfig) => {
    */
   const flushIfChanged = (s: KernelState, out: Command[]) => {
     const ledger = toDurable(s, config)
-    const text = durableText(ledger)
+    const digest = durableDigest(ledger)
     const awaited = Object.values(s.plans).some(
       p => p.status === 'executing' && p.phase === 'commit' && (p.flushSeq ?? 0) > s.seq
     )
-    if (text === s.lastDurable && !awaited) return
+    if (digest === s.lastDurable && !awaited) return
     if (s.seq + 1 >= NEVER) return stop(s, out, 'unsafe', 'flush sequence exhausted')
-    s.lastDurable = text
+    s.lastDurable = digest
     s.seq++
     emit(out, {
       type: 'flush',

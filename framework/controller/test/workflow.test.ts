@@ -90,7 +90,7 @@ const library = () => {
       })
     })
   }
-  return { runner, kernel, state, want, submit, advanced, sent }
+  return { runner, kernel, workflow, state, want, submit, advanced, sent }
 }
 
 describe('the workflow library', () => {
@@ -108,6 +108,27 @@ describe('the workflow library', () => {
     await until(() => state().plans['k#run.0'] === undefined, 'the second stage')
     expect(advanced).toStrictEqual([{ intentId: 'k#run.0', stage: 1, block: included }])
     expect(state().observations).toStrictEqual({})
+    await runner.abandon()
+  })
+
+  it('holds what it reads of a parked plan, never the kernel state', async () => {
+    const { runner, kernel, workflow, state, want, submit } = library()
+    await kernel.start(runner)
+    await until(() => state().lifecycle.kind === 'running', 'running')
+    want('T')
+    submit()
+    await until(() => state().plans['k#run.0']?.phase === 'awaiting-advance', 'the first stage')
+    const plan = state().plans['k#run.0']!
+    const held = runner.read(workflow.state)!
+    expect(Object.keys(held).toSorted()).toStrictEqual(['facts', 'parked', 'sent'])
+    expect(held.parked).toStrictEqual([
+      {
+        intentId: plan.intentId,
+        cursor: plan.cursor,
+        evidence: plan.evidence,
+        lastInclusion: plan.lastInclusion
+      }
+    ])
     await runner.abandon()
   })
 

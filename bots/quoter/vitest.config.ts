@@ -1,0 +1,26 @@
+import { fileURLToPath } from 'node:url'
+import soltag from 'soltag/vite'
+import { loadEnv } from 'vite'
+import { defineConfig } from 'vitest/config'
+
+const BOT_DIR = fileURLToPath(new URL('.', import.meta.url))
+
+export default defineConfig({
+  plugins: [soltag({ solc: { optimizer: { enabled: true, runs: 200 } } })],
+  test: {
+    name: 'quoter',
+    include: ['test/**/*.test.ts'],
+    // Several cases here spawn the CLI as a real subprocess through tsx. A tsx cold start is ~1.3s
+    // against bun's ~0.1s, and with projects running in parallel the slowest of them exceeded the 5s
+    // default under CPU contention. The subprocess work is genuinely slower now, so the ceiling is
+    // raised rather than the parallelism reduced.
+    testTimeout: 30_000,
+    // The e2e suite forks Base and reads RPC_URL_8453; see the liquidation bots' configs for why
+    // loadEnv is safe when the file is absent.
+    env: {
+      QUOTER_BOT_BUILD_REVISION: 'abcdef0123456789',
+      QUOTER_BOT_BUILD_IMAGE_TAG: 'test-deployment',
+      ...loadEnv('test', BOT_DIR, '')
+    }
+  }
+})

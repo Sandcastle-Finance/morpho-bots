@@ -135,6 +135,7 @@ describe('reallocatorKernel', () => {
       maxSimLagBlocks: 30,
       stuckBlocks: 40,
       maxEvidenceAgeBlocks: 12_000,
+      retiredRetentionBlocks: 12_000,
       latchBoundBlocks: 1_000,
       recoveryBoundMs: 15 * 60_000,
       revokeAfterStaleMs: 60 * 60_000,

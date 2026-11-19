@@ -562,7 +562,10 @@ bot's supersession, or with a halt, stop or other kernel transition that fails i
 §10). A plan with no evidence is never advanced here. When a fact node becomes
 unavailable as a whole, its last value is forgotten, so no advance rests on it ("forgets a fact
 whose node becomes unavailable, so no advance rests on its last value"). Nothing here is a second
-store of the workflow: it reads the kernel's plans, and the kernel judges every advance.
+store of the workflow: it reads the kernel's plans, and the kernel judges every advance. Its state
+holds only what it reads of each parked plan (intent, cursor, evidence, last inclusion, validity and
+decision), never the kernel's state, which would be re-encoded on every write of its own ("holds
+what it reads of a parked plan, never the kernel state").
 
 `${id}.events` carries `{ intentId, stage, block }` per advance sent ("advances a parked stage once
 its decision reads the same after its own inclusion"). No log helper is provided.

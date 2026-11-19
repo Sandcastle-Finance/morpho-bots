@@ -107,6 +107,7 @@ export const transactionKernelConfig = (
   feePolicy: () => limits.maxSpendWei,
   maxSimLagBlocks: blocksFor(MAX_SIM_LAG_MS, chain, MIN_SIM_LAG_BLOCKS),
   maxEvidenceAgeBlocks: limits.maxEvidenceAgeBlocks,
+  retiredRetentionBlocks: limits.maxEvidenceAgeBlocks,
   stuckBlocks: blocksFor(limits.stuckMs, chain),
   latchBoundBlocks: blocksFor(LATCH_BOUND_MS, chain),
   recoveryBoundMs: RECOVERY_BOUND_MS,

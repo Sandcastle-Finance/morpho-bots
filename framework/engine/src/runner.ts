@@ -1,6 +1,6 @@
 import { types } from 'node:util'
 
-import type { DerivedWrite, NodeRecord, Pending } from './core'
+import type { CoreMeter, DerivedWrite, NodeRecord, Pending } from './core'
 import type { Data } from './data'
 import type {
   EffectContext,
@@ -16,7 +16,7 @@ import type {
   Stamp,
   Written
 } from './graph'
-import type { JournaledStep, JournalEntry, JournalSink } from './journal'
+import type { JournalAppendCost, JournaledStep, JournalEntry, JournalSink } from './journal'
 
 import { createCore, layout } from './core'
 import { encode, freezeData } from './data'
@@ -79,9 +79,59 @@ export type ObservedStep = Readonly<{
 /** Sees each committed step before it is journaled. It can neither act on the run nor stop it: engine SPEC §5.1. */
 export type StepObserver = (step: ObservedStep) => void
 
+/**
+ * Measures what a run costs: engine SPEC §5.2. Every call is synchronous and inside the run, so a
+ * meter must be cheap and must not call the runner; one that throws or returns a thenable is never
+ * called again.
+ */
+export type RunnerMeter = CoreMeter &
+  Readonly<{
+    /** A committed or rolled-back step's propagation. */
+    step: (ms: number) => void
+    /** An entry encoded when queued or when appended, and the bytes queued plus in flight after. */
+    journal: (stage: 'queued' | 'appended', bytes: number, ms: number, backlogBytes: number) => void
+    /** What the sink reported spending on an append it completed. */
+    journalSink: (cost: JournalAppendCost) => void
+    /** The run finished: stopped, halted or abandoned. Called once; its journal may still drain. */
+    finish: () => void
+  }>
+
+const ignore = () => undefined
+
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+  ((typeof value === 'object' && value !== null) || typeof value === 'function') &&
+  typeof (value as { then?: unknown }).then === 'function'
+
+/** `meter` dropped at its first throw or returned thenable, so measuring can never fail a run. */
+const guardMeter = (meter: RunnerMeter): RunnerMeter => {
+  let live = true
+  const guard =
+    <A extends unknown[]>(call: (...args: A) => unknown) =>
+    (...args: A) => {
+      if (!live) return
+      try {
+        const returned = call(...args)
+        if (types.isPromise(returned)) void Promise.prototype.then.call(returned, ignore, ignore)
+        if (isThenable(returned)) live = false
+      } catch {
+        live = false
+      }
+    }
+  return {
+    step: guard((...args) => meter.step(...args)),
+    write: guard((...args) => meter.write(...args)),
+    operator: guard((...args) => meter.operator(...args)),
+    roundTrip: guard((...args) => meter.roundTrip(...args)),
+    journal: guard((...args) => meter.journal(...args)),
+    journalSink: guard((...args) => meter.journalSink(...args)),
+    finish: guard(() => meter.finish())
+  }
+}
+
 export type RunnerOptions = Readonly<{
   now?: () => number
   observe?: StepObserver
+  meter?: RunnerMeter
   /**
    * Written after each step and never awaited by one. A failed append, or more than
    * `capacityBytes` encoded bytes queued plus in flight, closes the journal and fails the graph
@@ -123,12 +173,6 @@ export type Runner = Readonly<{
   stopped: Promise<unknown>
 }>
 
-const ignore = () => undefined
-
-const isThenable = (value: unknown): value is PromiseLike<unknown> =>
-  ((typeof value === 'object' && value !== null) || typeof value === 'function') &&
-  typeof (value as { then?: unknown }).then === 'function'
-
 type Delivered = EffectRequest<Record<string, Every<unknown>>>
 
 type Step = Readonly<{ stamp: Stamp; writes: readonly Pending[]; wakes: readonly string[] }>
@@ -159,7 +203,8 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
   if (options.observe !== undefined && typeof options.observe !== 'function')
     throw new GraphDefinitionError('an observer must be a function')
   const now = options.now ?? Date.now
-  const core = createCore(graph)
+  const meter = options.meter && guardMeter(options.meter)
+  const core = createCore(graph, undefined, meter)
   const pending: (readonly Pending[])[] = []
   const lanes = new Map<Lane, LaneState>()
   /** Lanes start their work in the order their effects were declared. */
@@ -223,7 +268,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
 
   const journalIo = async (
     operation: 'append' | 'finalize',
-    run: (signal: AbortSignal) => Promise<void>
+    run: (signal: AbortSignal) => Promise<JournalAppendCost | void>
   ) => {
     const controller = new AbortController()
     const timeoutMs = journal?.ioTimeoutMs ?? DEFAULT_JOURNAL_IO_TIMEOUT_MS
@@ -242,7 +287,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       }, tickMs)
     })
     try {
-      await Promise.race([Promise.resolve().then(() => run(controller.signal)), timeout])
+      return await Promise.race([Promise.resolve().then(() => run(controller.signal)), timeout])
     } finally {
       clearInterval(timer)
     }
@@ -293,10 +338,12 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
     void Promise.resolve()
       .then(async () => {
         const nextDeltas = new Map(journal.deltas)
+        const started = meter ? performance.now() : 0
         const entry = compactJournalEntry(described(queued.entry), nextDeltas)
         queued.entry = entry
         const bytes = Buffer.byteLength(encode(entry))
         const added = bytes - queued.bytes
+        meter?.journal('appended', bytes, performance.now() - started, journal.bytes + added)
         if (added > 0 && journal.bytes + added > journal.capacityBytes) {
           journal.writing = false
           journal.writingBytes = 0
@@ -309,7 +356,8 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
         journal.bytes += added
         queued.bytes = bytes
         journal.writingBytes = bytes
-        await journalIo('append', signal => journal.sink.append(entry, signal))
+        const cost = await journalIo('append', signal => journal.sink.append(entry, signal))
+        if (cost) meter?.journalSink(cost)
         return { nextDeltas }
       })
       .then(
@@ -335,7 +383,9 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
 
   const append = (entry: JournalEntry) => {
     if (!journal || journal.closed || journal.closing) return
+    const started = meter ? performance.now() : 0
     const bytes = Buffer.byteLength(encode(entry))
+    meter?.journal('queued', bytes, performance.now() - started, journal.bytes + bytes)
     if (journal.bytes + bytes > journal.capacityBytes)
       return closeJournal(new JournalOverflowError(journal.capacityBytes))
     journal.bytes += bytes
@@ -660,6 +710,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
     if (writes.length === 0 && wakes.length === 0) return
     if (observer && pushSeq === 0) observe({ seq: 0, at }, [...graph[layout].nodes.keys()], [])
     const stamp = { seq: ++pushSeq, at }
+    const started = meter ? performance.now() : 0
     let derived: readonly DerivedWrite[]
     try {
       derived = core.run(writes, stamp, wakes)
@@ -667,6 +718,8 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
       origin = core.failedOperator()
       rolledBack = { stamp, writes, wakes }
       throw error
+    } finally {
+      meter?.step(performance.now() - started)
     }
     if (observer)
       observe(stamp, [...new Set([...writes.map(w => w.node), ...derived.map(d => d.node)])], wakes)
@@ -746,6 +799,7 @@ export const createRunner = (graph: Graph, options: RunnerOptions = {}): Runner 
   const abandon = (clean = false) => {
     if (!finished) {
       finished = true
+      meter?.finish()
       for (const { timer } of timers) clearInterval(timer)
       clearTimeout(expiryTimer)
       stopping.abort()

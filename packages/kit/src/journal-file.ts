@@ -371,16 +371,21 @@ export const createJournalFileSink = async (
       if (finalized) throw new JournalFileError('append after finalization', undefined)
       try {
         signal?.throwIfAborted()
+        const encoding = performance.now()
         const frame = lineOf({ type: 'entry', entry })
+        const encodeMs = performance.now() - encoding
         await writeFrame(frame, signal)
         signal?.throwIfAborted()
+        const syncing = performance.now()
         await file.datasync()
+        const syncMs = performance.now() - syncing
         signal?.throwIfAborted()
         written += frame.length
+        if (written >= runCapBytes) runCap.resolve({ bytes: written, runCapBytes })
+        return { bytes: frame.length, encodeMs, syncMs }
       } catch (error) {
         throw new JournalFileError('append durably', error)
       }
-      if (written >= runCapBytes) runCap.resolve({ bytes: written, runCapBytes })
     },
     finalize: async (signal, result) => {
       if (finalized) return

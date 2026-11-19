@@ -103,9 +103,9 @@
         "vitest": "catalog:",
       },
     },
-    "bots/quoter-bot": {
-      "name": "@morpho-org/quoter-bot",
-      "version": "1.0.0",
+    "bots/quoter": {
+      "name": "@morpho-org/quoter",
+      "version": "2.0.0",
       "bin": {
         "morpho-quoter": "./dist/src/index.js",
       },
@@ -660,7 +660,7 @@
 
     "@morpho-org/morpho-ts": ["@morpho-org/morpho-ts@2.10.0", "", {}, "sha512-6C9CbzHxSg1PupCyGKDZ/r0BV6kF+v66gwMbkExRQXU48pBKR6SRGvPogj/MjhIdW4uMvWEtilLyvzaaEYYjaw=="],
 
-    "@morpho-org/quoter-bot": ["@morpho-org/quoter-bot@workspace:bots/quoter-bot"],
+    "@morpho-org/quoter": ["@morpho-org/quoter@workspace:bots/quoter"],
 
 
     "@morpho-org/vault-v1-reallocation": ["@morpho-org/vault-v1-reallocation@workspace:bots/vault-v1-reallocation"],

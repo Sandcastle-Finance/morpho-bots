@@ -66,7 +66,13 @@ export type {
   ReadMode
 } from './describe'
 export { describeGraph, GRAPH_DESCRIPTION_FORMAT } from './describe'
-export type { JournalDeltaShapeState, JournalEntry, JournalSink, JournalWrite } from './journal'
+export type {
+  JournalAppendCost,
+  JournalDeltaShapeState,
+  JournalEntry,
+  JournalSink,
+  JournalWrite
+} from './journal'
 export { advanceJournalWriteShape, expandJournalWrite, JOURNAL_FORMAT } from './journal'
-export type { ObservedStep, Runner, RunnerOptions, StepObserver } from './runner'
+export type { ObservedStep, Runner, RunnerMeter, RunnerOptions, StepObserver } from './runner'
 export { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS, validateJournalLimits } from './runner'

@@ -54,10 +54,10 @@
     "knip": "knip",
     "lint": "oxlint --no-error-on-unmatched-pattern && bun run lint:playground-smoke && bun run --cwd packages/oxlint-plugin check:markdown && bun run --cwd packages/oxlint-plugin check:specs",
     "lint:fix": "oxlint --fix --no-error-on-unmatched-pattern",
-    "lint:playground-smoke": "oxlint --config bots/quoter-bot/scripts/playground-smoke.oxlintrc.json bots/quoter-bot/scripts/playground-smoke*.mjs",
-    "quoter-bot:playground": "bun run --cwd bots/quoter-bot playground:serve",
+    "lint:playground-smoke": "oxlint --config bots/quoter/scripts/playground-smoke.oxlintrc.json bots/quoter/scripts/playground-smoke*.mjs",
+    "quoter-bot:playground": "bun run --cwd bots/quoter playground:serve",
     "prepare": "husky",
-    "test": "vitest run && bun run --cwd bots/quoter-bot playground:test",
+    "test": "vitest run && bun run --cwd bots/quoter playground:test",
     "sessions": "bun run --silent --cwd tools/sessions sessions",
     "journal": "node tools/journal/src/bin.mjs"
   },

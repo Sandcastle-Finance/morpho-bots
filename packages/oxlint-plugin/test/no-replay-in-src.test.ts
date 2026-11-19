@@ -7,7 +7,7 @@ const code = "import { replay } from '@repo/engine/replay'"
 
 ruleTester.run('no-replay-in-src', noReplayInSrc, {
   valid: [
-    { code, filename: path.join('bots', 'quoter-bot', 'test', 'scenario', 'stages.test.ts') },
+    { code, filename: path.join('bots', 'quoter', 'test', 'scenario', 'stages.test.ts') },
     { code, filename: path.join('framework', 'kernel', 'test', 'host.test.ts') },
     { code, filename: path.join('bots', 'blue', 'scripts', 'replay-journal.ts') },
     { code, filename: path.join('tools', 'journal', 'src', 'cli.ts') },

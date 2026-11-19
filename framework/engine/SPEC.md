@@ -295,6 +295,21 @@ observer can never stop the graph (review).
   observer among them). It runs synchronously inside the step, which waits for it, so a slow
   observer delays every later step, and what reads the time sees those steps later (§16).
 
+### 5.2 The cost meter
+
+`createRunner(graph, { meter })` reports what a run costs as it runs: each step's propagation time,
+each write's canonical bytes and the time to encode, freeze and hash it, each operator's own time
+without its writes and how many inputs it took, each push or effect result's round trip, each
+journal entry's encoding when queued and when appended with the bytes then queued or in flight,
+what the sink reports an append cost (an `append` may resolve with its own encoding's bytes and
+time and its sync time), and, once, that the run finished, however it stopped or was abandoned; the
+journal may still drain after ("measures each step, write, operator, round trip, journal encoding
+and sink append, and the run finishing once"). Every call is synchronous. Like an observer it is
+not work: one that throws, or returns a promise or another thenable, is never called again, a
+returned promise's rejection is handled, and the run is the same with or without it ("drops a meter
+that throws, and the run goes on as it would without one", "drops a meter that returns a promise,
+and its rejection is never unhandled"). Without one, nothing is timed.
+
 ## 6. Expiries and wakes
 
 A node's **expiries** are, for a level, its write's own `expiry`; for a map or fold, each number
@@ -862,6 +877,8 @@ exports are the package root, `@repo/engine/replay` and `@repo/engine/testing`.
   does not return, or a returned promise built to refuse a handler (a throwing `constructor`), can
   still reject unhandled.
 - **A dropped step observer leaves no marker** in the journal; only `runner.observerFailed` says so.
+- **A cost meter is neither refused calls into the runner nor bounded in time** (§5.2). It runs
+  inside the step, so a meter that does more than count slows or changes the run.
 - **A finishing effect's failure is caught only for requests the stop started.** A `finishOnStop`
   request already running when the clean stop begins rejects into a finished runner, which ignores
   it, so `stopped` can resolve though that request failed.

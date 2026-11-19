@@ -515,6 +515,27 @@ describe('a journal file', () => {
     })
   })
 
+  it('reports what each durable append cost: its frame bytes, encoding and sync', async () => {
+    const created = await createJournalFileSink({
+      directory: await directory(),
+      graph: 'bot',
+      build,
+      capacityBytes,
+      runCapBytes,
+      runId: 'costed',
+      now: () => 7
+    })
+    const before = (await stat(created.path)).size
+    const cost = await created.journal.sink.append({ kind: 'recovery', origin: 'x', at: 1 })
+    const after = (await stat(created.path)).size
+    await created.finalize()
+    expect(cost).toStrictEqual({
+      bytes: after - before,
+      encodeMs: expect.any(Number),
+      syncMs: expect.any(Number)
+    })
+  })
+
   it('creates one exclusive 0600 file and restricts only the directories it creates', async () => {
     const path = await directory()
     await chmod(path, 0o755)

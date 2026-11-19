@@ -114,11 +114,13 @@ export const decode = (text: string): Data => JSON.parse(text, reviveBigint)
 
 /**
  * `value` as a journal reads it back, `decode(encode(value))`, frozen to any depth, with `value`
- * frozen too. Throws {@link NotDataError} for anything that is not data.
+ * frozen too, and the canonical text it went through. Throws {@link NotDataError} for anything that
+ * is not data.
  */
-export const roundTrip = (value: unknown): Data => {
-  const held = decode(encode(value))
+export const roundTripText = (value: unknown) => {
+  const text = encode(value)
+  const held: Data = decode(text)
   freeze(value)
   freeze(held)
-  return held
+  return { held, text }
 }

@@ -11,8 +11,13 @@ import { advance, factOf } from './act'
 /** An advance the workflow sent the kernel: a parked plan's next stage, on facts read at `block`. */
 export type WorkflowEvent = Readonly<{ intentId: string; stage: number; block: number }>
 
+/** What the workflow reads of a plan the kernel parks at a stage boundary. */
+type Parked = Readonly<
+  Pick<Plan, 'intentId' | 'cursor' | 'evidence' | 'lastInclusion' | 'validUntil' | 'decision'>
+>
+
 type Workflow = Readonly<{
-  kernelState?: KernelState
+  parked: readonly Parked[]
   facts: Readonly<Record<string, Keyed<unknown>>>
   /** Per parked plan, the advance last sent for it, so the same evidence is never sent twice. */
   sent: Readonly<Record<string, string>>
@@ -35,7 +40,7 @@ export type WorkflowOptions<D extends string> = Readonly<{
 const freshEvidence = <D extends string>(
   workflow: Workflow,
   nodes: readonly FactNode<D>[],
-  plan: Plan
+  plan: Parked
 ): readonly FactReading<D>[] | undefined => {
   const facts = plan.evidence ?? []
   if (facts.length === 0) return undefined
@@ -49,6 +54,22 @@ const freshEvidence = <D extends string>(
   })
   return read.every(current => current !== undefined) ? read : undefined
 }
+
+const parkedOf = (state: KernelState | undefined): readonly Parked[] =>
+  Object.values(state?.plans ?? {}).flatMap(plan =>
+    plan.status === 'executing' && plan.phase === 'awaiting-advance'
+      ? [
+          {
+            intentId: plan.intentId,
+            cursor: plan.cursor,
+            ...(plan.evidence !== undefined && { evidence: plan.evidence }),
+            ...(plan.lastInclusion !== undefined && { lastInclusion: plan.lastInclusion }),
+            ...(plan.validUntil !== undefined && { validUntil: plan.validUntil }),
+            ...(plan.decision !== undefined && { decision: plan.decision })
+          }
+        ]
+      : []
+  )
 
 /**
  * Advances each plan the kernel parks at a stage boundary once every fact its evidence names reads
@@ -68,8 +89,7 @@ export const declareWorkflow = <D extends string>(
   const advances = (workflow: Workflow) => {
     const emit = []
     const sent: Record<string, string> = {}
-    for (const plan of Object.values(workflow.kernelState?.plans ?? {})) {
-      if (plan.status !== 'executing' || plan.phase !== 'awaiting-advance') continue
+    for (const plan of workflow.parked) {
       const evidence = freshEvidence(workflow, options.facts, plan)
       if (evidence === undefined) {
         if (workflow.sent[plan.intentId] !== undefined)
@@ -104,9 +124,10 @@ export const declareWorkflow = <D extends string>(
       ...Object.fromEntries(options.facts.map((node, i) => [`fact${i}`, watch(node)]))
     },
     emits: [requests, events],
-    initial: { facts: {}, sent: {} },
+    initial: { parked: [], facts: {}, sent: {} },
     applyInput: (workflow, input) => {
-      if (input.from === 'kernel') return { state: { ...workflow, kernelState: input.value.value } }
+      if (input.from === 'kernel')
+        return { state: { ...workflow, parked: parkedOf(input.value.value) } }
       const node = options.facts[Number(String(input.from).slice(4))]!
       const keyed = (input.value as { value?: Keyed<unknown> }).value
       const { [node.id]: _, ...facts } = workflow.facts

@@ -76,7 +76,7 @@
   "overrides": [
     {
       "files": [
-        "**/vitest.config.ts",
+        "**/vitest{,.*}.config.ts",
         "packages/oxlint-plugin/src/index.ts",
         "tools/realtime-app/app/**/page.tsx",
         "tools/realtime-app/app/**/layout.tsx"
@@ -104,7 +104,7 @@
       }
     },
     {
-      "files": ["bots/monitor-bot/**"],
+      "files": ["bots/monitor/**"],
       "rules": {
         "repo/utils-apart-from-classes": "off",
         "repo/copy-style": "off",

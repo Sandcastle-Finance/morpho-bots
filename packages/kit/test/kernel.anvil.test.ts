@@ -280,6 +280,7 @@ describe.skipIf(!hasAnvil)(
         maxSimLagBlocks: 4,
         stuckBlocks: 4,
         maxEvidenceAgeBlocks: 64,
+        retiredRetentionBlocks: 64,
         latchBoundBlocks: 8,
         recoveryBoundMs: 60_000,
         revokeAfterStaleMs: 3_600_000,

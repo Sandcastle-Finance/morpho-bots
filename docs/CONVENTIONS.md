@@ -31,7 +31,7 @@ prose as much as to code.
   needs restructuring or the explanation belongs in an ADR or the plan.
 - **TSDoc on exports** only where there is real nuance, complexity, or high fan-in. State the
   guarantee or the hazard — never the algorithm, which the body already shows. Pithy is not absent:
-  `bots/quoter-bot`'s public surface is checked by `jsdoc:check`, and a docstring passes by naming
+  `bots/quoter`'s public surface is checked by `jsdoc:check`, and a docstring passes by naming
   the contract, failures, and side effects in a sentence or two.
 - **One home per explanation.** Document a rule once at its canonical symbol and `{@link}` it from
   everywhere else. Never restate the justification at each call site.
@@ -160,6 +160,10 @@ Avoid these patterns that produce tests that pass but verify nothing useful:
   nothing about the output
 - **Pinning log output**: Logs are observations of behavior, not its contract (Error handling, "Log
   shapes are not a contract"). Assert what the code did, and let its log lines change freely
+- **Asserting a speed budget**: A threshold on how fast code ran fails on a busy runner and passes
+  on an idle one. Measure speed in a benchmark (`vitest bench`), and give a test whose real work is
+  slow an explicit timeout. A test that a bounded wait gives up, such as a close timeout, may still
+  check that it returned, with a margin many times the bound
 
 ## Import patterns
 

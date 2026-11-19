@@ -81,6 +81,8 @@ Write mode also requires these, with no defaults:
 - `KERNEL_ENROLLMENT` — `enrolling` for the first start of an account, `enrolled` after.
 - `JOURNAL_RUN_CAP_BYTES` — the size at which a run's journal stops the bot cleanly.
 - `BUILD_REVISION` and `BUILD_IMAGE_TAG` — the build the journal names; the image sets them.
+- `CPU_PROFILE` — optional; `on` adds a bounded CPU profile, logged as `process.profile`, every
+  15 minutes and when the event loop stalls. `process.health` logs every minute regardless.
 
 Readonly mode needs `SIMULATION_CALLER_ADDRESS` instead: the non-zero public EOA that would execute
 resolutions in write mode, so `msg.sender`, profit transfers and reverts match execution without

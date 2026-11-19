@@ -108,6 +108,7 @@ export const makeConfig = (
     feePolicy: () => FEE,
     maxSimLagBlocks: 1,
     maxEvidenceAgeBlocks: 64,
+    retiredRetentionBlocks: rest.maxEvidenceAgeBlocks ?? 64,
     stuckBlocks: 3,
     latchBoundBlocks: 10,
     recoveryBoundMs: 60_000,

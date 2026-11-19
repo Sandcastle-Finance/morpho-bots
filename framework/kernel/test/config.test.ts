@@ -52,6 +52,28 @@ describe('a kernel host refuses its configuration', () => {
     expect(build(max)).not.toThrow()
   })
 
+  it('refuses a retiredRetentionBlocks below maxEvidenceAgeBlocks or not an integer up to 2³²', () => {
+    const build =
+      (value: unknown, maxEvidenceAgeBlocks = 64) =>
+      () =>
+        declareKernel(
+          createGraph('kernel'),
+          hostOptions({
+            config: {
+              ...makeConfig({ maxEvidenceAgeBlocks }),
+              retiredRetentionBlocks: value as number
+            }
+          })
+        )
+    for (const value of [...DEGENERATE, 63, MAX_BLOCKS + 1])
+      expect(build(value)).toThrow(
+        new KernelConfigError(`retiredRetentionBlocks must be an integer in [64, ${MAX_BLOCKS}]`)
+      )
+    expect(build(64)).not.toThrow()
+    expect(build(MAX_BLOCKS)).not.toThrow()
+    expect(build(0, 0)).not.toThrow()
+  })
+
   it('refuses a fee reserve that is not a positive bigint', () => {
     for (const feeReserve of [undefined, 0n, -1n, 1, Number.NaN])
       expect(declare({ config: makeConfig({ feeReserve: feeReserve as bigint }) })).toThrow(

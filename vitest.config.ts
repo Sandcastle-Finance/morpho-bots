@@ -27,8 +27,8 @@ const members = [
   'bots/vault-v2-reallocation',
   'bots/midnight-liquidation',
   'bots/midnight-crossed-books',
-  'bots/monitor-bot',
-  'bots/quoter-bot',
+  'bots/monitor',
+  'bots/quoter',
   'bots/roller'
 ].filter(member => fs.existsSync(new URL(`${member}/package.json`, import.meta.url)))
 

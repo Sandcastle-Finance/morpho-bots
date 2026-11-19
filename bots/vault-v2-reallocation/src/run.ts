@@ -2,6 +2,7 @@ import type { Runner, RunnerOptions } from '@repo/engine'
 import type { ReportCommand } from '@repo/kernel'
 
 import { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS } from '@repo/engine'
+import { createHealthMeter } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 
 import type { ReallocatorOptions } from './graph'
@@ -25,7 +26,11 @@ export const startReallocator = async (
   let runner: Runner
   try {
     declared = declareReallocator({ ...options, kernel: { ...options.kernel, now } })
-    runner = createRunner(declared.graph, { now, journal })
+    runner = createRunner(declared.graph, {
+      now,
+      journal,
+      meter: createHealthMeter({ logger: options.logger, kernel: declared.kernel.nodes })
+    })
   } catch (error) {
     const finalized = await tryCatch(
       journal.sink.finalize(

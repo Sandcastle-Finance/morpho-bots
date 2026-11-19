@@ -30,5 +30,5 @@ description = "Env-var prose in READMEs (`ENABLE_<VENUE>=true`) is not a token"
 regexes = ['''^ENABLE_[A-Z_]+=true$''']
 
 [[allowlists]]
-description = "monitor-bot fixtures: alert dedupe keys like 'vault-v1-deposit' next to the word key are event ids, not secrets"
+description = "monitor fixtures: alert dedupe keys like 'vault-v1-deposit' next to the word key are event ids, not secrets"
 regexes = ['''^vault-v[12]-deposit$''']

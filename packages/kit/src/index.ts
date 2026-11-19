@@ -42,6 +42,7 @@ export {
   readJournalFile
 } from './journal-file'
 export type { Policy, PolicyCheck, PolicyDecision, PolicyRule, PolicyTx } from './policy'
+export { createHealthMeter } from './process-health'
 export {
   DEFAULT_MAX_DATA_BYTES,
   DEFAULT_MAX_GAS_LIMIT,

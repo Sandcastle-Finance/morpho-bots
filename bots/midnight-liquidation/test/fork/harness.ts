@@ -106,12 +106,12 @@ async function waitForRpc(url: string, timeoutMs = 30_000): Promise<void> {
 // Anvil port registry — vitest runs test FILES IN PARALLEL, so every fork suite in the repo must
 // claim a distinct port:
 //   8545 bots/blue-liquidation      fork/liquidation
-//   8546 bots/quoter-bot         e2e/setup-check
+//   8546 bots/quoter         e2e/setup-check
 //   8547 bots/midnight-liquidation  fork/liquidation
-//   8549 bots/quoter-bot            e2e/quoter-bot
+//   8549 bots/quoter            e2e/quoter-bot
 //   8551 packages/kit               kernel.anvil (local chain, no fork)
 //   8552 framework/kernel           host.anvil (local chain, no fork)
-//   8553 bots/quoter-bot            e2e/market-lens.fork
+//   8553 bots/quoter            e2e/market-lens.fork
 //   8554 bots/roller                fork/rehearsal
 /**
  * Boots an anvil instance forking Base at FORK_BLOCK (chain id pinned to Base so signatures match).

@@ -22,14 +22,14 @@ welcome.
 | [blue-liquidation](./bots/blue-liquidation/)             | Liquidates eligible Morpho Blue positions               | [README](./bots/blue-liquidation/README.md)       |
 | [midnight-liquidation](./bots/midnight-liquidation/)     | Liquidates eligible Midnight positions                  | [README](./bots/midnight-liquidation/README.md)   |
 | [midnight-crossed-books](./bots/midnight-crossed-books/) | Resolves crossed Midnight offer books                   | [README](./bots/midnight-crossed-books/README.md) |
-| [quoter-bot](./bots/quoter-bot/)                         | Midnight maker: setup checks, bootstrap, ladder quoting | [README](./bots/quoter-bot/README.md)             |
+| [quoter-bot](./bots/quoter/)                             | Midnight maker: setup checks, bootstrap, ladder quoting | [README](./bots/quoter/README.md)                 |
 | [vault-v1-reallocation](./bots/vault-v1-reallocation/)   | Reallocates liquidity across Vault V1 Markets           | [README](./bots/vault-v1-reallocation/README.md)  |
 | [vault-v2-reallocation](./bots/vault-v2-reallocation/)   | Reallocates liquidity across Morpho Vault V2 Markets    | [README](./bots/vault-v2-reallocation/README.md)  |
 
 The quoter-bot CLI is also published to npm as
 [`@morpho-org/quoter`](https://www.npmjs.com/package/@morpho-org/quoter) and to Docker Hub as
 [`morphoorg/quoter`](https://hub.docker.com/r/morphoorg/quoter); both are published from this
-repository's `quoter-bot-*` tags by the workflows under [`.github/workflows/`](./.github/workflows/).
+repository's `quoter-*` tags by the workflows under [`.github/workflows/`](./.github/workflows/).
 
 ## Packages
 
@@ -65,12 +65,12 @@ bun run knip        # dead-code detection
 bun run test        # vitest projects plus Node playground suites
 ```
 
-The fork and e2e suites under `bots/*/test/fork/` and `bots/quoter-bot/test/e2e/` fork Base at a
+The fork and e2e suites under `bots/*/test/fork/` and `bots/quoter/test/e2e/` fork Base at a
 pinned block and need `RPC_URL_8453` set to an archive endpoint; see each bot's README.
 
 ## Releases
 
-Release tags look like `<bot>-<PR#>`, for example `quoter-bot-227`. A `quoter-bot-*` tag publishes
+Release tags look like `<bot>-<PR#>`, for example `quoter-227`. A `quoter-*` tag publishes
 the npm package and the Docker Hub image.
 
 ## Pointers

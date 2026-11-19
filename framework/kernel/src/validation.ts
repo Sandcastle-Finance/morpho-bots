@@ -68,6 +68,7 @@ const rangeDefect = (options: object, ranges: Readonly<Record<string, Range>>) =
 /** Why a kernel host could not enforce `config` as given, or `undefined` when it can. */
 export const configDefect = (config: KernelConfig): string | undefined =>
   rangeDefect(config, CONFIG_RANGES) ??
+  rangeDefect(config, { retiredRetentionBlocks: [config.maxEvidenceAgeBlocks, MAX_BLOCKS] }) ??
   (typeof config.feeReserve === 'bigint' && config.feeReserve > 0n
     ? undefined
     : 'feeReserve must be a positive bigint')

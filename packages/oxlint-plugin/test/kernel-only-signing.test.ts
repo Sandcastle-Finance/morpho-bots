@@ -3,8 +3,8 @@ import path from 'node:path'
 import { kernelOnlySigning } from '../src/kernel-only-signing'
 import { ruleTester } from './rule-tester'
 
-const kernel = path.join('bots', 'quoter-bot', 'src', 'kernel.ts')
-const botFile = path.join('bots', 'quoter-bot', 'src', 'bootstrap.ts')
+const kernel = path.join('bots', 'quoter', 'src', 'kernel.ts')
+const botFile = path.join('bots', 'quoter', 'src', 'bootstrap.ts')
 
 const signerImport = "import { privateKeyToAccount } from 'viem/accounts'"
 const broadcast =
@@ -18,7 +18,7 @@ ruleTester.run('kernel-only-signing', kernelOnlySigning, {
       code: "import { createAccountSigner, createKmsAccount } from '@repo/kit'",
       filename: kernel
     },
-    { code: signerImport, filename: path.join('bots', 'quoter-bot', 'test', 'kernel.test.ts') },
+    { code: signerImport, filename: path.join('bots', 'quoter', 'test', 'kernel.test.ts') },
     {
       code: signerImport,
       filename: path.join('bots', 'midnight-liquidation', 'scripts', 'seed.ts')
@@ -38,7 +38,7 @@ ruleTester.run('kernel-only-signing', kernelOnlySigning, {
     { code: broadcast, filename: botFile, errors: 1 },
     {
       code: signerImport,
-      filename: path.join('bots', 'quoter-bot', 'src', 'infrastructure', 'kernel.ts'),
+      filename: path.join('bots', 'quoter', 'src', 'infrastructure', 'kernel.ts'),
       errors: 2
     },
     { code: "import { type HDKey, toAccount } from 'viem/accounts'", filename: botFile, errors: 2 },

@@ -225,7 +225,7 @@ maker as committing nothing, and confirms it").
 **Refuses** a `withdraw` inside a `multicall`, with value, with trailing calldata, with a witness, or
 to any target but this chain's Midnight ("refuses %s"). The quoter's signer policy pins the
 `withdraw` selector on Midnight with its own constant gas ceiling, `MAX_REDEMPTION_GAS` in
-`bots/quoter-bot/src/kernel.ts`, about twice the most a `withdraw` was measured to cost on a Base fork
+`bots/quoter/src/kernel.ts`, about twice the most a `withdraw` was measured to cost on a Base fork
 (review).
 
 ## What is deliberately left out

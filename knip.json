@@ -31,7 +31,9 @@
     "packages/oxlint-plugin": {},
     "packages/swaps": {},
     "tools/sessions": {},
-    "tools/realtime-app": {},
+    "tools/realtime-app": {
+      "entry": ["test/**/*.bench.ts"]
+    },
     "tools/journal": {},
     "bots/midnight-liquidation": {
       "ignore": ["src/generated/**"],
@@ -52,15 +54,15 @@
       "entry": ["src/index.ts", "scripts/probe-live-lens.ts"],
       "ignoreDependencies": ["@repo/contracts"]
     },
-    "bots/monitor-bot": {
+    "bots/monitor": {
       "ignore": ["src/generated/**"],
       "entry": ["src/index.ts", "scripts/create-channels.ts"]
     },
     "bots/midnight-crossed-books": {
       "ignore": ["src/infrastructure/*/generated/**"]
     },
-    "bots/quoter-bot": {
-      "entry": ["src/index.ts", "playground/app.tsx"],
+    "bots/quoter": {
+      "entry": ["src/index.ts", "playground/app.tsx", "test/**/*.bench.ts"],
       "ignoreDependencies": ["@repo/contracts"]
     }
   }

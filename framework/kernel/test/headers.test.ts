@@ -74,7 +74,7 @@ describe('headers the kernel checks evidence against', () => {
   })
 
   it('releases the headers a retired entry named, so completed offers do not grow the window', () => {
-    const h = new Harness().start()
+    const h = new Harness(makeConfig({ retiredRetentionBlocks: 1_000 })).start()
     h.send({ type: 'Submit', plan: ecrecoverPlan('q', T) })
     h.sign()
     h.materialize(signatures => publish(T, signatures[0]), T)
@@ -85,6 +85,7 @@ describe('headers the kernel checks evidence against', () => {
     h.finalize(h.block)
     expect(h.entry(midnightId('g1'))?.state).toBe('retired')
     for (let i = 0; i < h.config.maxEvidenceAgeBlocks + 20; i++) h.head()
+    expect(h.entry(midnightId('g1'))?.state).toBe('retired')
     const kept = Object.keys(h.state.headers).map(Number)
     expect(Math.min(...kept)).toBeGreaterThanOrEqual(windowFloor(h) - 1)
   })

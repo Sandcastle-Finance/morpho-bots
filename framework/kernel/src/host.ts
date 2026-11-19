@@ -70,6 +70,8 @@ export type KernelNodes = Readonly<{
   /** The kernel's poll clock, a member of its recovery scope, so it stops once the graph degrades. */
   tick: Stream<TickEvent>
   state: State<KernelState>
+  /** Every event the reducer folds, in order. */
+  input: Stream<KernelEvent>
   commands: Stream<Command>
   activity: Stream<readonly KernelActivity[]>
   heads: Stream<KernelHead>
@@ -424,10 +426,10 @@ export const declareKernelHost = (g: GraphBuilder, options: Hosting) => {
     { recovery: ({ nodes, reserved }) => haltOn(reserved.state, nodes.requests) }
   )
   const state = reserved.state
-  const { start, requests, tick, commands, activity, heads } = nodes
+  const { start, requests, tick, input, commands, activity, heads } = nodes
   let attached = false
   return {
-    nodes: { requests, tick, state, commands, activity, heads } satisfies KernelNodes,
+    nodes: { requests, tick, state, input, commands, activity, heads } satisfies KernelNodes,
     start: starter(options, start, parts.adapter),
     attach: (inputs: Pick<KernelHostOptions, 'requests' | 'facts'>) => {
       if (attached) throw new GraphDefinitionError('the kernel is attached twice')

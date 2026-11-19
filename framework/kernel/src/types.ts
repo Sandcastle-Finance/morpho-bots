@@ -107,6 +107,11 @@ export type KernelConfig = {
    * its preparation time, and how far a chain source may lag the one a crashed run followed.
    */
   maxEvidenceAgeBlocks: number
+  /**
+   * How many blocks past its retirement a retired entry is kept, at least `maxEvidenceAgeBlocks`;
+   * once it is dropped its id may be admitted again (SPEC §1).
+   */
+  retiredRetentionBlocks: number
   stuckBlocks: number
   latchBoundBlocks: number
   recoveryBoundMs: number
@@ -230,6 +235,8 @@ export type Entry = {
   /** The nonce whose candidates retire it; see the kernel's `reviewRevocations`. */
   neutralizing?: { nonce: number }
   retiredBy?: string
+  /** The head it retired at; never durable. */
+  retiredAt?: number
   recoveryAttempts: number
   stuck: boolean
   compensate: boolean
@@ -417,6 +424,7 @@ export type KernelState = {
   slot?: number
   nextRequest: number
   seq: number
+  /** A digest of the durable projection's text with `seq` zeroed, so a flush is sent only on change. */
   lastDurable: string
   capacity: Record<string, { amount: bigint; block: number; blockHash: Hash }>
   /** Highest flush sequence the runtime has acknowledged as durable. */

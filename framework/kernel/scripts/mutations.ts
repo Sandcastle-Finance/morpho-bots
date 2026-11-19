@@ -437,8 +437,8 @@ export const MUTATIONS: readonly Mutation[] = [
   },
   {
     id: 'a commit that changes nothing durable is never flushed',
-    find: 'if (text === s.lastDurable && !awaited) return',
-    replace: 'if (text === s.lastDurable) return',
+    find: 'if (digest === s.lastDurable && !awaited) return',
+    replace: 'if (digest === s.lastDurable) return',
     coveredBy: {
       find: '    else s.releases[plan.intentId] = releaseOf(s, plan)\n',
       replace: '',
@@ -467,7 +467,7 @@ export const MUTATIONS: readonly Mutation[] = [
   },
   {
     id: 'headers are never pruned',
-    find: "if (event.type === 'Head') pruneHeaders(s)",
+    find: '      pruneHeaders(s)\n',
     replace: ''
   },
   {
@@ -494,6 +494,36 @@ export const MUTATIONS: readonly Mutation[] = [
     id: 'a retired entry keeps its headers',
     find: "        e.state === 'retired'\n          ? []",
     replace: '        false\n          ? []'
+  },
+  {
+    id: 'retired entries are never dropped',
+    find: '      pruneRetired(s)\n',
+    replace: ''
+  },
+  {
+    id: 'a retired entry is dropped before its retention window passes',
+    find: 'head - (entry.retiredAt ?? head) < window',
+    replace: 'false'
+  },
+  {
+    id: 'a retired entry is dropped in the transition that retires it under a zero window',
+    find: 'const window = Math.max(config.retiredRetentionBlocks, 1)',
+    replace: 'const window = config.retiredRetentionBlocks'
+  },
+  {
+    id: 'a retired entry is dropped while its own plan executes',
+    find: 'if (namedIntents.has(entry.intentId) || namedIds.has(id)) continue',
+    replace: 'if (namedIds.has(id)) continue'
+  },
+  {
+    id: 'a retired entry is dropped while a recovery plan names it',
+    find: '      ...working.flatMap(p => (p.recovery?.entry === undefined ? [] : [p.recovery.entry])),\n',
+    replace: ''
+  },
+  {
+    id: 'a retired entry is dropped while a nonce candidate names it',
+    find: 'r.candidates.flatMap(c => [...c.creates, ...c.exposes, ...c.retires])',
+    replace: '[]'
   },
   {
     id: 'finished plans are never pruned',

@@ -173,6 +173,7 @@ const configFor = (account: PrivateKeyAccount): KernelConfig => ({
   feePolicy: () => FEE,
   maxSimLagBlocks: 2,
   maxEvidenceAgeBlocks: 64,
+  retiredRetentionBlocks: 64,
   stuckBlocks: 2,
   latchBoundBlocks: 3,
   recoveryBoundMs: 60_000,

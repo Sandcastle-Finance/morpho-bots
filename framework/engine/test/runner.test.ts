@@ -14,6 +14,7 @@ import type {
   Node,
   ObservedStep,
   Runner,
+  RunnerMeter,
   RunnerOptions,
   Source,
   StepObserver,
@@ -2854,6 +2855,123 @@ type ShippedFormats = {
       }
     | { readonly kind: 'recovery'; readonly origin: string; readonly at: number }
 }
+
+const recordingMeter = () => {
+  const calls: { kind: string; args: readonly unknown[] }[] = []
+  const record =
+    (kind: string) =>
+    (...args: unknown[]) =>
+      void calls.push({ kind, args })
+  const meter: RunnerMeter = {
+    step: record('step'),
+    write: record('write'),
+    operator: record('operator'),
+    roundTrip: record('roundTrip'),
+    journal: record('journal'),
+    journalSink: record('journalSink'),
+    finish: record('finish')
+  }
+  return { meter, calls, of: (kind: string) => calls.filter(call => call.kind === kind) }
+}
+
+describe('a cost meter', () => {
+  it('measures each step, write, operator, round trip, journal encoding and sink append, and the run finishing once', async () => {
+    const { g, amounts } = ledgerGraph()
+    const { meter, of } = recordingMeter()
+    const runner = createRunner(g.build(), {
+      now: () => 0,
+      meter,
+      journal: {
+        sink: {
+          append: async () => ({ bytes: 30, encodeMs: 1, syncMs: 2 }),
+          finalize: async () => undefined
+        },
+        capacityBytes: 64_000
+      }
+    })
+    runner.push(amounts, 12)
+    await sleep(10)
+    expect(of('finish')).toHaveLength(0)
+    await runner.abandon()
+    await runner.abandon()
+    expect(of('finish')).toHaveLength(1)
+    expect(of('journalSink').map(({ args }) => args[0])).toStrictEqual([
+      { bytes: 30, encodeMs: 1, syncMs: 2 }
+    ])
+    expect(of('step')).toHaveLength(1)
+    expect(
+      of('write').map(({ args: [node, bytes, , value] }) => [node, bytes, value])
+    ).toStrictEqual([
+      ['amounts', 2, 12],
+      ['total', 2, 12],
+      ['orders', 2, 12],
+      ['doubled', 2, 24]
+    ])
+    expect(of('operator').map(({ args: [id, , inputs] }) => [id, inputs])).toStrictEqual([
+      ['total', 1],
+      ['doubled', 1]
+    ])
+    expect(of('roundTrip').map(({ args: [node, bytes] }) => [node, bytes])).toStrictEqual([
+      ['amounts', 2]
+    ])
+    expect(of('journal').map(({ args: [stage] }) => stage)).toStrictEqual(['queued', 'appended'])
+  })
+
+  it('drops a meter that throws, and the run goes on as it would without one', async () => {
+    const run = async (meter?: RunnerMeter) => {
+      const { g, amounts, total } = ledgerGraph()
+      const entries: JournalEntry[] = []
+      const runner = createRunner(g.build(), {
+        now: () => 0,
+        ...(meter && { meter }),
+        journal: {
+          sink: {
+            append: async entry => void entries.push(entry),
+            finalize: async () => undefined
+          },
+          capacityBytes: 64_000
+        }
+      })
+      runner.push(amounts, 1)
+      runner.push(amounts, 2)
+      const sum = runner.read(total)
+      await runner.abandon()
+      return { sum, entries }
+    }
+    const write = vi.fn(() => {
+      throw new Error('meter failed')
+    })
+    const step = vi.fn()
+    const metered = await run({ ...recordingMeter().meter, write, step })
+    expect(metered).toStrictEqual(await run())
+    expect(metered.sum).toBe(3)
+    expect(write).toHaveBeenCalledOnce()
+    expect(step).not.toHaveBeenCalled()
+  })
+
+  it('drops a meter that returns a promise, and its rejection is never unhandled', async () => {
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    const { g, amounts, total } = ledgerGraph()
+    const write = vi.fn(async () => {
+      throw new Error('meter failed')
+    })
+    const step = vi.fn()
+    const runner = createRunner(g.build(), {
+      // oxlint-disable-next-line typescript/no-misused-promises -- the async meter is the case under test
+      meter: { ...recordingMeter().meter, write, step }
+    })
+    runner.push(amounts, 1)
+    runner.push(amounts, 2)
+    await sleep(10)
+    process.off('unhandledRejection', unhandled)
+    expect(runner.read(total)).toBe(3)
+    expect(write).toHaveBeenCalledOnce()
+    expect(step).not.toHaveBeenCalled()
+    expect(unhandled).not.toHaveBeenCalled()
+    await runner.abandon()
+  })
+})
 
 describe('the journal format', () => {
   it('names the entry shape it writes, so a shape change cannot ship under an old format', () => {

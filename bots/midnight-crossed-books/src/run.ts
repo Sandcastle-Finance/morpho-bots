@@ -2,6 +2,7 @@ import type { Runner, RunnerOptions } from '@repo/engine'
 import type { ReportCommand } from '@repo/kernel'
 
 import { createRunner, DEFAULT_JOURNAL_IO_TIMEOUT_MS } from '@repo/engine'
+import { createHealthMeter } from '@repo/kit'
 import { tryCatch } from '@repo/utils'
 
 import type { ResolverOptions } from './graph'
@@ -29,7 +30,11 @@ export const startResolver = async (
       kernel: { ...options.kernel, now }
     })
     nodes = declared
-    runner = createRunner(graph, { now, journal })
+    runner = createRunner(graph, {
+      now,
+      journal,
+      meter: createHealthMeter({ logger: options.logger, kernel: declared.kernel.nodes })
+    })
   } catch (error) {
     const finalized = await tryCatch(
       journal.sink.finalize(

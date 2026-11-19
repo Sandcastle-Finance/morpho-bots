@@ -19,6 +19,7 @@ export const configFor = (validator: Validator, caps: KernelConfig['caps']): Ker
   maxSimLagBlocks: 3,
   stuckBlocks: 3,
   maxEvidenceAgeBlocks: 64,
+  retiredRetentionBlocks: 64,
   latchBoundBlocks: 100,
   recoveryBoundMs: 60_000,
   revokeAfterStaleMs: 3_600_000,

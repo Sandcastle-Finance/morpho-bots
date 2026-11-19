@@ -11,6 +11,6 @@ ruleTester.run('test-under-test-dir', testUnderTestDir, {
     { code, filename: path.join('bots', 'blue', 'src', 'tick.ts') }
   ],
   invalid: [
-    { code, filename: path.join('bots', 'quoter-bot', 'scripts', 'check-jsdoc.test.ts'), errors: 1 }
+    { code, filename: path.join('bots', 'quoter', 'scripts', 'check-jsdoc.test.ts'), errors: 1 }
   ]
 })

@@ -70,10 +70,10 @@ jobs:
         # in the source repository's CI. Patterns are matched relative to each vitest project root.
         run: |
           bunx vitest run --exclude '**/test/fork/**' --exclude '**/test/e2e/**'
-          bun run --cwd bots/quoter-bot playground:test
+          bun run --cwd bots/quoter playground:test
 
       - name: Run browser smoke tests
-        run: bun run --cwd bots/quoter-bot playground:smoke:test
+        run: bun run --cwd bots/quoter playground:smoke:test
 
   Dead-Code:
     runs-on: ubuntu-latest

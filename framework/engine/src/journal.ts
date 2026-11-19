@@ -44,8 +44,12 @@ export type JournalEntry =
   /** From here on only the graph's recovery runs, after a failure at `origin`. */
   | Readonly<{ kind: 'recovery'; origin: string; at: number }>
 
+/** What a sink spent appending one entry: its own encoding's bytes and time, and its sync. */
+export type JournalAppendCost = Readonly<{ bytes: number; encodeMs: number; syncMs: number }>
+
 export type JournalSink = Readonly<{
-  append(entry: JournalEntry, signal?: AbortSignal): Promise<void>
+  /** Resolves once the entry is durable, optionally with what that cost (§5.2). */
+  append(entry: JournalEntry, signal?: AbortSignal): Promise<JournalAppendCost | void>
   finalize(signal?: AbortSignal, result?: Readonly<{ clean: boolean }>): Promise<void>
 }>
 
