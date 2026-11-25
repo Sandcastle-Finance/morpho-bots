@@ -16,12 +16,45 @@ const READ_RATE_LIMIT = {
 }
 
 /**
- * The base HTTP transport kit clients share: a viem-dlc `failover` pair when `fallbackUrl` is
- * set, else a single `http` endpoint — each with a {@link RPC_TIMEOUT_MS} per-request timeout.
+ * Robinhood Chain's public endpoint. Measured 2026-11-25: it serves 20 requests a second
+ * sustained and answers HTTP 429 to about half of 80 a second, so it gets a budget under that.
+ */
+const ROBINHOOD_PUBLIC_RPC_HOST = 'rpc.mainnet.chain.robinhood.com'
+const ROBINHOOD_PUBLIC_RATE_LIMIT = {
+  maxRequestsPerSecond: 20,
+  maxBurstRequests: 20,
+  maxConcurrentRequests: 10
+}
+
+/** The read budget to hold this endpoint to. */
+const readRateLimit = (url: string) =>
+  url.includes(ROBINHOOD_PUBLIC_RPC_HOST) ? ROBINHOOD_PUBLIC_RATE_LIMIT : READ_RATE_LIMIT
+
+/**
+ * The endpoints named by a fallback setting: one URL, or several separated by commas, tried in
+ * the order given.
+ */
+const fallbackUrls = (fallback: string | undefined): string[] =>
+  (fallback ?? '')
+    .split(',')
+    .map(url => url.trim())
+    .filter(url => url !== '')
+
+/**
+ * The base HTTP transport kit clients share: a viem-dlc `failover` over the primary and every
+ * endpoint in `fallbackUrl` (see {@link fallbackUrls}) when it is set, else a single `http` endpoint — each with a {@link RPC_TIMEOUT_MS} per-request timeout.
  */
 export function createHttpTransport(primaryUrl: string, fallbackUrl?: string) {
-  const rpc = (url: string) => http(url, { timeout: RPC_TIMEOUT_MS })
-  return fallbackUrl ? failover([rpc(primaryUrl), rpc(fallbackUrl)]) : rpc(primaryUrl)
+  // Only an endpoint with a measured budget is held to one here; the rest keep the plain transport.
+  const rpc = (url: string) => {
+    const endpoint = http(url, { timeout: RPC_TIMEOUT_MS })
+    return url.includes(ROBINHOOD_PUBLIC_RPC_HOST)
+      ? rateLimiter(endpoint, [ROBINHOOD_PUBLIC_RATE_LIMIT])
+      : endpoint
+  }
+  const fallbacks = fallbackUrls(fallbackUrl)
+  if (fallbacks.length === 0) return rpc(primaryUrl)
+  return failover([rpc(primaryUrl), ...fallbacks.map(rpc)])
 }
 
 /**
@@ -44,13 +77,14 @@ export function createDeploylessTransport(options: {
 }): Transport<'viem-dlc-deployless'> {
   const { chainId, rpcUrl, rpcUrlFallback, batchSize, timeoutMs = RPC_TIMEOUT_MS } = options
   const branch = (url: string) =>
-    deployless(rateLimiter(http(url, { timeout: timeoutMs }), [READ_RATE_LIMIT]), {
+    deployless(rateLimiter(http(url, { timeout: timeoutMs }), [readRateLimit(url)]), {
       gasLimit: ethCallGasCap(chainId, url),
       batchSize
     })
 
-  if (!rpcUrlFallback) return branch(rpcUrl)
-  return asDeploylessTransport(failover([branch(rpcUrl), branch(rpcUrlFallback)]))
+  const fallbacks = fallbackUrls(rpcUrlFallback)
+  if (fallbacks.length === 0) return branch(rpcUrl)
+  return asDeploylessTransport(failover([branch(rpcUrl), ...fallbacks.map(branch)]))
 }
 
 /**

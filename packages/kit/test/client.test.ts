@@ -43,6 +43,29 @@ describe('createDeploylessClient', () => {
     expect(hosts.at(0)).toBe('localhost:8545')
     expect(hosts.at(-1)).toBe('localhost:8546')
   })
+
+  it('tries every comma-separated fallback in order', async () => {
+    const hosts: string[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (
+      url: string | URL,
+      init?: { body?: string }
+    ) => {
+      const { host } = new URL(String(url))
+      if (hosts.at(-1) !== host) hosts.push(host)
+      const { id } = JSON.parse(init?.body ?? '{}') as { id: number }
+      return host === 'localhost:8547'
+        ? Response.json({ jsonrpc: '2.0', id, result: '0x2a' })
+        : new Response('upstream down', { status: 400 })
+    }) as unknown as typeof fetch)
+    const client = createDeploylessClient({
+      chain: base,
+      rpcUrl: RPC,
+      rpcUrlFallback: 'http://localhost:8546, http://localhost:8547'
+    })
+
+    expect(await getBlockNumber(client, { cacheTime: 0 })).toBe(42n)
+    expect(hosts).toEqual(['localhost:8545', 'localhost:8546', 'localhost:8547'])
+  })
 })
 
 describe('createDeploylessClient timeoutMs', () => {
@@ -62,7 +85,11 @@ describe('createDeploylessClient timeoutMs', () => {
         })
       )
     }) as unknown as typeof fetch)
-    const client = createDeploylessClient({ chain: base, rpcUrl: RPC, timeoutMs: 50 })
+    const client = createDeploylessClient({
+      chain: base,
+      rpcUrl: RPC,
+      timeoutMs: 50
+    })
 
     await expect(getBlockNumber(client, { cacheTime: 0 })).rejects.toThrow()
     expect(waited.length).toBeGreaterThan(0)
