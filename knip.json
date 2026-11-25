@@ -51,7 +51,7 @@
       "ignoreDependencies": ["@repo/contracts"]
     },
     "bots/vault-v2-reallocation": {
-      "entry": ["src/index.ts", "scripts/probe-live-lens.ts"],
+      "entry": ["src/index.ts", "scripts/probe-live-lens.ts", "scripts/plan-once.ts"],
       "ignoreDependencies": ["@repo/contracts"]
     },
     "bots/monitor": {

@@ -32,12 +32,12 @@ import { createDeploylessClient } from '@repo/kit'
 import { ensureError } from '@repo/utils'
 import { getAddress } from 'viem'
 import { getBlock, getBlockNumber, multicall, readContract } from 'viem/actions'
-import { base, mainnet } from 'viem/chains'
+import { base, mainnet, robinhood } from 'viem/chains'
 
 import { fetchVaults } from '../src/vault-data'
 import { InvalidProbeConfigError } from './errors'
 
-const CHAINS = { [mainnet.id]: mainnet, [base.id]: base }
+const CHAINS = { [mainnet.id]: mainnet, [base.id]: base, [robinhood.id]: robinhood }
 // A few blocks back: a public RPC's archive window always covers the recent past, and pinning off the
 // exact head avoids a reorg racing the two reads.
 const HEAD_LAG = 8n

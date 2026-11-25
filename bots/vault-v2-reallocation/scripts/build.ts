@@ -38,7 +38,11 @@ const soltagPlugin: Plugin = {
 
 try {
   await esbuild({
-    entryPoints: [join(ROOT, 'src/index.ts'), join(ROOT, 'scripts/probe-live-lens.ts')],
+    entryPoints: [
+      join(ROOT, 'src/index.ts'),
+      join(ROOT, 'scripts/probe-live-lens.ts'),
+      join(ROOT, 'scripts/plan-once.ts')
+    ],
     outdir: DIST_DIR,
     outbase: ROOT,
     bundle: true,

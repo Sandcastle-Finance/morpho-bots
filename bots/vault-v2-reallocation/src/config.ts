@@ -3,7 +3,7 @@ import type { Address, Chain, Hex } from 'viem'
 
 import { parseKernelSettings } from '@repo/kit'
 import { getAddress, isAddress, isHex } from 'viem'
-import { base, mainnet } from 'viem/chains'
+import { base, mainnet, robinhood } from 'viem/chains'
 
 import { InvalidConfigError } from './errors'
 
@@ -12,7 +12,8 @@ import { InvalidConfigError } from './errors'
 // just the viem chain. loadConfig fails loud for any CHAIN_ID not present here.
 const CHAIN_MAP: Record<number, Chain> = {
   [mainnet.id]: mainnet,
-  [base.id]: base
+  [base.id]: base,
+  [robinhood.id]: robinhood
 }
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const

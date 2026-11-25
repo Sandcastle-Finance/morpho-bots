@@ -8,6 +8,7 @@
     "build": "tsx scripts/build.ts",
     "prestart": "bun run --filter @repo/contracts build && bun run build",
     "probe:lens": "bun run --filter @repo/contracts build && bun run build && node --env-file-if-exists=.env dist/scripts/probe-live-lens.js",
+    "plan:once": "bun run --filter @repo/contracts build && bun run build && node --env-file-if-exists=.env dist/scripts/plan-once.js",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
     "typecheck": "soltag && tsc --noEmit"
   },
